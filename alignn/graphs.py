@@ -534,6 +534,7 @@ class Graph(object):
             use_lattice_prop: bool = False,
             cutoff_extra=3.5,
             w=None,
+            ew=None,
             collapse_tol=1e-4,
     ):
         """Obtain a DGLGraph for Atoms object."""
@@ -548,9 +549,6 @@ class Graph(object):
             )
             u, v, r = build_undirected_edgedata(atoms, edges)
         elif neighbor_strategy == "radius_graph":
-            # print('HERE')
-            # import sys
-            # sys.exit()
             u, v, r = radius_graph(
                 atoms, cutoff=cutoff, cutoff_extra=cutoff_extra
             )
@@ -589,6 +587,7 @@ class Graph(object):
         g.ndata["coords"] = torch.tensor(atoms.cart_coords)
         if w is not None:
             g.ndata["weights"] = w
+        if ew is not None:
             g.edata["weights"] = ew
         if use_lattice_prop:
             lattice_prop = np.array(

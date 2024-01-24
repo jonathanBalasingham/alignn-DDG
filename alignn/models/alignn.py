@@ -177,7 +177,6 @@ class ALIGNNConv(nn.Module):
         lg = lg.local_var()
         # Edge-gated graph convolution update on crystal graph
         x, m = self.node_update(g, x, y, weights=w, edge_weights=ew)
-
         # Edge-gated graph convolution update on crystal graph
         y, z = self.edge_update(lg, m, z)  # TODO: Update this with vertex-weighted line graph
         return x, y, z
@@ -318,7 +317,12 @@ class ALIGNN(nn.Module):
             lg = lg.local_var()
 
             # angle features (fixed)
-            z = self.angle_embedding(lg.edata.pop("h"))
+            h = lg.edata.pop("h")
+            print(h)
+            print(torch.max(h))
+            print(torch.min(h))
+            z = self.angle_embedding(h)
+            print(z)
         if self.config.extra_features != 0:
             features = g.ndata["extra_features"]
             # print('g',g)
@@ -331,7 +335,6 @@ class ALIGNN(nn.Module):
         # print('x1',x.shape)
         x = self.atom_embedding(x)
         # print('x2',x.shape)
-
         # initial bond features
         bondlength = torch.norm(g.edata.pop("r"), dim=1)
         y = self.edge_embedding(bondlength)
@@ -344,7 +347,7 @@ class ALIGNN(nn.Module):
         # ALIGNN updates: update node, edge, triplet features
         for alignn_layer in self.alignn_layers:
             x, y, z = alignn_layer(g, lg, x, y, z, w=w, ew=ew)
-
+        exit(0)
         # gated GCN updates: update node, edge features
         for gcn_layer in self.gcn_layers:
             x, y = gcn_layer(g, x, y, weights=w, edge_weights=ew)
