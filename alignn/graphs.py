@@ -8,6 +8,7 @@ from collections import OrderedDict
 from jarvis.analysis.structure.neighbors import NeighborsAnalysis
 from jarvis.core.specie import chem_data, get_node_attributes
 import math
+from scipy.spatial.distance import pdist, squareform
 
 # from jarvis.core.atoms import Atoms
 from collections import defaultdict
@@ -24,10 +25,10 @@ except Exception as exp:
 
 
 def canonize_edge(
-    src_id,
-    dst_id,
-    src_image,
-    dst_image,
+        src_id,
+        dst_id,
+        src_image,
+        dst_image,
 ):
     """Compute canonical edge representation.
 
@@ -50,12 +51,179 @@ def canonize_edge(
     return src_id, dst_id, src_image, dst_image
 
 
+def check_neighbors(neighbor_distances, k):
+    if len(neighbor_distances) < k or len(neighbor_distances) < 2:
+        return False
+
+    if neighbor_distances[-1] == neighbor_distances[k - 1]:
+        return False
+    return True
+
+
+def lex_comp(a, b):
+    idx = np.where((a > b) != (a < b))[0]
+    if len(idx) == 0:
+        return "eq"
+    else:
+        if a[idx[0]] < b[idx[0]]:
+            return "lt"
+        else:
+            return "gt"
+
+
+def combine(neighbors, groups):
+    grouped_atoms = []
+    new_ids = {g: i for i, group in enumerate(groups) for g in group}
+    for group in groups:
+        replacement_atom = neighbors[group[0]]
+        for i in range(len(replacement_atom)):
+            # ith neighbor -> average distance and replace
+            current_distance = 0
+            for nid in group:
+                current_distance += neighbors[nid][i][2]
+            replacement_atom[i][2] = current_distance / len(group)
+            replacement_atom[i][1] = new_ids[replacement_atom[i][1]]
+            replacement_atom[i][0] = new_ids[replacement_atom[i][0]]
+        grouped_atoms.append(replacement_atom)
+    return grouped_atoms
+
+
+def compare_points(an1, an2, ann1, ann2, d1, d2):
+    #  Compare Atomic Numbers
+    if an1 < an2:
+        return "lt"
+    elif an2 < an1:
+        return "gt"
+    #  Compare distances
+    comp_res = lex_comp(d1, d2)
+    if comp_res != "eq":
+        return comp_res
+    return lex_comp(ann1, ann2)
+
+
+#  From AMD package
+def _collapse_into_groups(overlapping):
+    overlapping = squareform(overlapping)
+    group_nums = {}  # row_ind: group number
+    group = 0
+    for i, row in enumerate(overlapping):
+        if i not in group_nums:
+            group_nums[i] = group
+            group += 1
+            for j in np.argwhere(row).T[0]:
+                if j not in group_nums:
+                    group_nums[j] = group_nums[i]
+
+    groups = defaultdict(list)
+    for row_ind, group_num in sorted(group_nums.items()):
+        groups[group_num].append(row_ind)
+    return list(groups.values())
+
+
+def nearest_neighbor_ddg(atoms=None,
+                         max_neighbors=12,
+                         cutoff=8,
+                         collapse_tol=1e-4,
+                         use_canonize=False):
+    all_neighbors = atoms.get_all_neighbors(r=cutoff)
+    min_nbrs = min(len(neighborlist) for neighborlist in all_neighbors)
+
+    if min_nbrs < max_neighbors:
+        lat = atoms.lattice
+        if cutoff < max(lat.a, lat.b, lat.c):
+            r_cut = max(lat.a, lat.b, lat.c)
+        else:
+            r_cut = 2 * cutoff
+        return nearest_neighbor_ddg(
+            atoms=atoms,
+            cutoff=r_cut,
+            max_neighbors=max_neighbors,
+        )
+
+    neighbor_distances = [np.sort(nd[:, 2]) for nd in all_neighbors]
+    neighbors_okay = np.all([check_neighbors(nl, max_neighbors) for nl in neighbor_distances])
+
+    if not np.all(neighbors_okay):
+        return nearest_neighbor_ddg(
+            atoms=atoms,
+            cutoff=2 * cutoff,
+            max_neighbors=max_neighbors,
+        )
+    sorted_neighbors = [sorted(n, key=lambda x: x[2]) for n in all_neighbors]
+    neighbor_indices = [[l[1] for l in nl] for nl in sorted_neighbors]
+    an = np.array(atoms.atomic_numbers)
+    neighbor_atomic_numbers = [an[indx] for indx in neighbor_indices]
+    distance_an_pairs = [list(zip(d, a)) for d, a in zip(neighbor_distances, neighbor_atomic_numbers)]
+
+    final_neighbor_indices = [[i for i, x in sorted(enumerate(pair), key=lambda x: x[1])][:max_neighbors] for pair in
+                              distance_an_pairs]
+    atomic_num_mat = np.vstack(
+        [[neighbor_atomic_numbers[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)])
+    psuedo_pdd = np.vstack([[neighbor_distances[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)])
+
+    overlapping = pdist(psuedo_pdd, metric='chebyshev') <= collapse_tol
+    types_match = pdist(an.reshape((-1, 1))) == 0
+    neighbors_match = (pdist(atomic_num_mat) == 0)
+    collapsable = overlapping & types_match & neighbors_match
+    groups = _collapse_into_groups(collapsable)
+    sorted_neighbors = [[sorted_neighbors[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)]
+    neighbors = combine(sorted_neighbors, groups)
+
+    # edges = defaultdict(set)
+    edges = defaultdict(list)
+    for site_idx, neighborlist in enumerate(neighbors):
+        ids = np.array([nbr[1] for nbr in neighborlist])
+        images = np.array([nbr[3] for nbr in neighborlist])
+        print(f"adding: {len(ids)}")
+        for dst, image in zip(ids, images):
+            src_id, dst_id, src_image, dst_image = canonize_edge(
+                site_idx, dst, (0, 0, 0), tuple(image)
+            )
+            if use_canonize:
+                edges[(src_id, dst_id)].append(dst_image)
+            else:
+                edges[(site_idx, dst)].append(tuple(image))
+
+    for i, j in edges:
+        print(f"ID: {(i, j)}")
+        print(f"edges: {edges[(i, j)]}")
+    #  Attempt 1:
+    idx_to_keep = set([i[0] for i in groups])
+    w = [len(g) / len(sorted_neighbors) for g in groups]
+    for i in range(atoms.num_atoms - 1, -1, -1):
+        if i not in idx_to_keep:
+            atoms = atoms.remove_site_by_index(i)
+
+    u, v, r = [], [], []
+    for (src_id, dst_id), images in edges.items():
+        for dst_image in images:
+            # fractional coordinate for periodic image of dst
+            dst_coord = atoms.frac_coords[dst_id] + dst_image
+            # cartesian displacement vector pointing from src -> dst
+            d = atoms.lattice.cart_coords(
+                dst_coord - atoms.frac_coords[src_id]
+            )
+            # if np.linalg.norm(d)!=0:
+            # print ('jv',dst_image,d)
+            # add edges for both directions
+            for uu, vv, dd in [(src_id, dst_id, d)]:
+                u.append(uu)
+                v.append(vv)
+                r.append(dd)
+    u, v, r = (np.array(x) for x in (u, v, r))
+    u = torch.tensor(u)
+    v = torch.tensor(v)
+    r = torch.tensor(r).type(torch.get_default_dtype())
+    w = torch.tensor(w).reshape((-1, 1))
+    return u, v, r, w, atoms
+
+
 def nearest_neighbor_edges(
-    atoms=None,
-    cutoff=8,
-    max_neighbors=12,
-    id=None,
-    use_canonize=False,
+        atoms=None,
+        cutoff=8,
+        max_neighbors=12,
+        id=None,
+        use_canonize=False,
 ):
     """Construct k-NN edge list."""
     # returns List[List[Tuple[site, distance, index, image]]]
@@ -126,8 +294,8 @@ def nearest_neighbor_edges(
 
 
 def build_undirected_edgedata(
-    atoms=None,
-    edges={},
+        atoms=None,
+        edges={},
 ):
     """Build undirected graph data from edge set.
 
@@ -161,12 +329,12 @@ def build_undirected_edgedata(
 
 
 def radius_graph(
-    atoms=None,
-    cutoff=5,
-    bond_tol=0.5,
-    id=None,
-    atol=1e-5,
-    cutoff_extra=3.5,
+        atoms=None,
+        cutoff=5,
+        bond_tol=0.5,
+        id=None,
+        atol=1e-5,
+        cutoff_extra=3.5,
 ):
     """Construct edge list for radius graph."""
 
@@ -187,7 +355,7 @@ def radius_graph(
         # determine how many supercells are needed for the cutoff radius
         recp = 2 * math.pi * torch.linalg.inv(lattice_mat).T
         recp_len = torch.tensor(
-            [i for i in (torch.sqrt(torch.sum(recp**2, dim=1)))]
+            [i for i in (torch.sqrt(torch.sum(recp ** 2, dim=1)))]
         )
         maxr = torch.ceil((cutoff + bond_tol) * recp_len / (2 * math.pi))
         nmin = torch.floor(torch.min(frac_coords, dim=0)[0]) - maxr
@@ -251,11 +419,11 @@ def radius_graph(
 
 ###
 def radius_graph_old(
-    atoms=None,
-    cutoff=5,
-    bond_tol=0.5,
-    id=None,
-    atol=1e-5,
+        atoms=None,
+        cutoff=5,
+        bond_tol=0.5,
+        id=None,
+        atol=1e-5,
 ):
     """Construct edge list for radius graph."""
     cart_coords = torch.tensor(atoms.cart_coords).type(
@@ -273,7 +441,7 @@ def radius_graph_old(
     # determine how many supercells are needed for the cutoff radius
     recp = 2 * math.pi * torch.linalg.inv(lattice_mat).T
     recp_len = torch.tensor(
-        [i for i in (torch.sqrt(torch.sum(recp**2, dim=1)))]
+        [i for i in (torch.sqrt(torch.sum(recp ** 2, dim=1)))]
     )
     maxr = torch.ceil((cutoff + bond_tol) * recp_len / (2 * math.pi))
     nmin = torch.floor(torch.min(frac_coords, dim=0)[0]) - maxr
@@ -324,13 +492,13 @@ class Graph(object):
     """Generate a graph object."""
 
     def __init__(
-        self,
-        nodes=[],
-        node_attributes=[],
-        edges=[],
-        edge_attributes=[],
-        color_map=None,
-        labels=None,
+            self,
+            nodes=[],
+            node_attributes=[],
+            edges=[],
+            edge_attributes=[],
+            color_map=None,
+            labels=None,
     ):
         """
         Initialize the graph object.
@@ -355,17 +523,19 @@ class Graph(object):
 
     @staticmethod
     def atom_dgl_multigraph(
-        atoms=None,
-        neighbor_strategy="k-nearest",
-        cutoff=8.0,
-        max_neighbors=12,
-        atom_features="cgcnn",
-        max_attempts=3,
-        id: Optional[str] = None,
-        compute_line_graph: bool = True,
-        use_canonize: bool = False,
-        use_lattice_prop: bool = False,
-        cutoff_extra=3.5,
+            atoms=None,
+            neighbor_strategy="k-nearest",
+            cutoff=8.0,
+            max_neighbors=12,
+            atom_features="cgcnn",
+            max_attempts=3,
+            id: Optional[str] = None,
+            compute_line_graph: bool = True,
+            use_canonize: bool = False,
+            use_lattice_prop: bool = False,
+            cutoff_extra=3.5,
+            w=None,
+            collapse_tol=1e-4,
     ):
         """Obtain a DGLGraph for Atoms object."""
         # print('id',id)
@@ -384,6 +554,15 @@ class Graph(object):
             # sys.exit()
             u, v, r = radius_graph(
                 atoms, cutoff=cutoff, cutoff_extra=cutoff_extra
+            )
+        elif neighbor_strategy == "ddg":
+            #  TODO: Need to return weights for vertices and modify atom set
+            u, v, r, w, atoms = nearest_neighbor_ddg(
+                atoms=atoms,
+                max_neighbors=max_neighbors,
+                use_canonize=use_canonize,
+                collapse_tol=collapse_tol,
+                cutoff=cutoff
             )
         else:
             raise ValueError("Not implemented yet", neighbor_strategy)
@@ -409,6 +588,8 @@ class Graph(object):
         vol = atoms.volume
         g.ndata["V"] = torch.tensor([vol for ii in range(atoms.num_atoms)])
         g.ndata["coords"] = torch.tensor(atoms.cart_coords)
+        if w is not None:
+            g.ndata["weights"] = w
         if use_lattice_prop:
             lattice_prop = np.array(
                 [atoms.lattice.lat_lengths(), atoms.lattice.lat_angles()]
@@ -438,17 +619,17 @@ class Graph(object):
 
     @staticmethod
     def from_atoms(
-        atoms=None,
-        get_prim=False,
-        zero_diag=False,
-        node_atomwise_angle_dist=False,
-        node_atomwise_rdf=False,
-        features="basic",
-        enforce_c_size=10.0,
-        max_n=100,
-        max_cut=5.0,
-        verbose=False,
-        make_colormap=True,
+            atoms=None,
+            get_prim=False,
+            zero_diag=False,
+            node_atomwise_angle_dist=False,
+            node_atomwise_rdf=False,
+            features="basic",
+            enforce_c_size=10.0,
+            max_n=100,
+            max_cut=5.0,
+            verbose=False,
+            make_colormap=True,
     ):
         """
         Get Networkx graph. Requires Networkx installation.
@@ -651,7 +832,7 @@ class Standardize(torch.nn.Module):
 
 
 def prepare_dgl_batch(
-    batch: Tuple[dgl.DGLGraph, torch.Tensor], device=None, non_blocking=False
+        batch: Tuple[dgl.DGLGraph, torch.Tensor], device=None, non_blocking=False
 ):
     """Send batched dgl crystal graph to device."""
     g, t = batch
@@ -664,9 +845,9 @@ def prepare_dgl_batch(
 
 
 def prepare_line_graph_batch(
-    batch: Tuple[Tuple[dgl.DGLGraph, dgl.DGLGraph], torch.Tensor],
-    device=None,
-    non_blocking=False,
+        batch: Tuple[Tuple[dgl.DGLGraph, dgl.DGLGraph], torch.Tensor],
+        device=None,
+        non_blocking=False,
 ):
     """Send line graph batch to device.
 
@@ -699,7 +880,7 @@ def compute_bond_cosines(edges):
     r1 = -edges.src["r"]
     r2 = edges.dst["r"]
     bond_cosine = torch.sum(r1 * r2, dim=1) / (
-        torch.norm(r1, dim=1) * torch.norm(r2, dim=1)
+            torch.norm(r1, dim=1) * torch.norm(r2, dim=1)
     )
     bond_cosine = torch.clamp(bond_cosine, -1, 1)
     # bond_cosine = torch.arccos((torch.clamp(bond_cosine, -1, 1)))
@@ -713,18 +894,18 @@ class StructureDataset(torch.utils.data.Dataset):
     """Dataset of crystal DGLGraphs."""
 
     def __init__(
-        self,
-        df: pd.DataFrame,
-        graphs: Sequence[dgl.DGLGraph],
-        target: str,
-        target_atomwise="",
-        target_grad="",
-        target_stress="",
-        atom_features="atomic_number",
-        transform=None,
-        line_graph=False,
-        classification=False,
-        id_tag="jid",
+            self,
+            df: pd.DataFrame,
+            graphs: Sequence[dgl.DGLGraph],
+            target: str,
+            target_atomwise="",
+            target_grad="",
+            target_stress="",
+            atom_features="atomic_number",
+            transform=None,
+            line_graph=False,
+            classification=False,
+            id_tag="jid",
     ):
         """Pytorch Dataset for atomistic graphs.
 
@@ -745,7 +926,7 @@ class StructureDataset(torch.utils.data.Dataset):
         self.labels = self.df[target]
 
         if (
-            self.target_atomwise is not None and self.target_atomwise != ""
+                self.target_atomwise is not None and self.target_atomwise != ""
         ):  # and "" not in self.target_atomwise:
             # self.labels_atomwise = df[self.target_atomwise]
             self.labels_atomwise = []
@@ -757,7 +938,7 @@ class StructureDataset(torch.utils.data.Dataset):
                 )
 
         if (
-            self.target_grad is not None and self.target_grad != ""
+                self.target_grad is not None and self.target_grad != ""
         ):  # and "" not in  self.target_grad :
             # self.labels_atomwise = df[self.target_atomwise]
             self.labels_grad = []
@@ -769,7 +950,7 @@ class StructureDataset(torch.utils.data.Dataset):
                 )
             # print (self.labels_atomwise)
         if (
-            self.target_stress is not None and self.target_stress != ""
+                self.target_stress is not None and self.target_stress != ""
         ):  # and "" not in  self.target_stress :
             # self.labels_atomwise = df[self.target_atomwise]
             self.labels_stress = []
@@ -801,15 +982,15 @@ class StructureDataset(torch.utils.data.Dataset):
                 f = f.unsqueeze(0)
             g.ndata["atom_features"] = f
             if (
-                self.target_atomwise is not None and self.target_atomwise != ""
+                    self.target_atomwise is not None and self.target_atomwise != ""
             ):  # and "" not in self.target_atomwise:
                 g.ndata[self.target_atomwise] = self.labels_atomwise[i]
             if (
-                self.target_grad is not None and self.target_grad != ""
+                    self.target_grad is not None and self.target_grad != ""
             ):  # and "" not in  self.target_grad:
                 g.ndata[self.target_grad] = self.labels_grad[i]
             if (
-                self.target_stress is not None and self.target_stress != ""
+                    self.target_stress is not None and self.target_stress != ""
             ):  # and "" not in  self.target_stress:
                 # print(
                 #    "self.labels_stress[i]",
@@ -895,7 +1076,7 @@ class StructureDataset(torch.utils.data.Dataset):
 
     @staticmethod
     def collate_line_graph(
-        samples: List[Tuple[dgl.DGLGraph, dgl.DGLGraph, torch.Tensor]]
+            samples: List[Tuple[dgl.DGLGraph, dgl.DGLGraph, torch.Tensor]]
     ):
         """Dataloader helper to batch graphs cross `samples`."""
         graphs, line_graphs, labels = map(list, zip(*samples))

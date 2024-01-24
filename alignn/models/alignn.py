@@ -8,7 +8,7 @@ import dgl
 import dgl.function as fn
 import numpy as np
 import torch
-from dgl.nn import AvgPooling
+from dgl.nn import AvgPooling, SumPooling
 
 # from dgl.nn.functional import edge_softmax
 from pydantic.typing import Literal
@@ -17,6 +17,7 @@ from torch.nn import functional as F
 
 from alignn.models.utils import RBFExpansion
 from alignn.utils import BaseSettings
+from alignn.models.WeightedBatchNorm1d import WeightedBatchNorm1d
 
 
 class ALIGNNConfig(BaseSettings):
@@ -73,16 +74,19 @@ class EdgeGatedGraphConv(nn.Module):
         self.dst_gate = nn.Linear(input_features, output_features)
         self.edge_gate = nn.Linear(input_features, output_features)
         self.bn_edges = nn.BatchNorm1d(output_features)
+        self.bn_edges_weighted = WeightedBatchNorm1d(output_features)
 
         self.src_update = nn.Linear(input_features, output_features)
         self.dst_update = nn.Linear(input_features, output_features)
         self.bn_nodes = nn.BatchNorm1d(output_features)
+        self.bn_nodes_weighted = WeightedBatchNorm1d(output_features)
 
     def forward(
         self,
         g: dgl.DGLGraph,
         node_feats: torch.Tensor,
         edge_feats: torch.Tensor,
+        weights: torch.Tensor = None,
     ) -> torch.Tensor:
         """Edge-gated graph convolution.
 
@@ -122,8 +126,13 @@ class EdgeGatedGraphConv(nn.Module):
         # x = self.src_update(node_feats) + g.ndata.pop("h")
 
         # node and edge updates
-        x = F.silu(self.bn_nodes(x))
-        y = F.silu(self.bn_edges(m))
+        if weights is None:
+            x = F.silu(self.bn_nodes(x))
+            y = F.silu(self.bn_edges(m))
+        else:
+            x = F.silu(self.bn_nodes_weighted(x, weights))
+            N, M = m.shape
+            y = F.silu(self.bn_edges_weighted(m, weights.unsqueeze(1).expand(N, M, 1).reshape((-1, 1))))
 
         if self.residual:
             x = node_feats + x
@@ -152,6 +161,7 @@ class ALIGNNConv(nn.Module):
         x: torch.Tensor,
         y: torch.Tensor,
         z: torch.Tensor,
+        w: torch.Tensor = None,
     ):
         """Node and Edge updates for ALIGNN layer.
 
@@ -162,10 +172,10 @@ class ALIGNNConv(nn.Module):
         g = g.local_var()
         lg = lg.local_var()
         # Edge-gated graph convolution update on crystal graph
-        x, m = self.node_update(g, x, y)
+        x, m = self.node_update(g, x, y, weights=w)
 
         # Edge-gated graph convolution update on crystal graph
-        y, z = self.edge_update(lg, m, z)
+        y, z = self.edge_update(lg, m, z, weights=w)
 
         return x, y, z
 
@@ -181,10 +191,16 @@ class MLPLayer(nn.Module):
             nn.BatchNorm1d(out_features),
             nn.SiLU(),
         )
+        self.linear = nn.Linear(in_features, out_features)
+        self.bn = WeightedBatchNorm1d(out_features)
+        self.silu = nn.SiLU()
 
-    def forward(self, x):
+    def forward(self, x, w=None):
         """Linear, Batchnorm, silu layer."""
-        return self.layer(x)
+        if w is None:
+            return self.layer(x)
+        else:
+            return self.silu(self.bn(self.linear(x), weight=w))
 
 
 class ALIGNN(nn.Module):
@@ -243,6 +259,7 @@ class ALIGNN(nn.Module):
         )
 
         self.readout = AvgPooling()
+        self.weighted_readout = SumPooling()
         self.readout_feat = AvgPooling()
         if self.classification:
             self.fc = nn.Linear(config.hidden_features, config.num_classes)
@@ -315,17 +332,22 @@ class ALIGNN(nn.Module):
         # initial bond features
         bondlength = torch.norm(g.edata.pop("r"), dim=1)
         y = self.edge_embedding(bondlength)
-
+        w = None
+        if "weights" in g.ndata:
+            w = g.ndata["weights"]
         # ALIGNN updates: update node, edge, triplet features
         for alignn_layer in self.alignn_layers:
-            x, y, z = alignn_layer(g, lg, x, y, z)
+            x, y, z = alignn_layer(g, lg, x, y, z, w=w)
 
         # gated GCN updates: update node, edge features
         for gcn_layer in self.gcn_layers:
             x, y = gcn_layer(g, x, y)
 
         # norm-activation-pool-classify
-        h = self.readout(g, x)
+        if w is None:
+            h = self.readout(g, x)
+        else:
+            h = self.weighted_readout(g, x * w)
         # print('h',h.shape)
         # print('features',features.shape)
         if self.config.extra_features != 0:
