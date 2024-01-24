@@ -140,7 +140,7 @@ def nearest_neighbor_ddg(atoms=None,
             max_neighbors=max_neighbors,
         )
 
-    neighbor_distances = [np.sort(nd[:, 2]) for nd in all_neighbors]
+    neighbor_distances = [np.sort([n[2] for n in nl]) for nl in all_neighbors]
     neighbors_okay = np.all([check_neighbors(nl, max_neighbors) for nl in neighbor_distances])
 
     if not np.all(neighbors_okay):
@@ -174,7 +174,6 @@ def nearest_neighbor_ddg(atoms=None,
     for site_idx, neighborlist in enumerate(neighbors):
         ids = np.array([nbr[1] for nbr in neighborlist])
         images = np.array([nbr[3] for nbr in neighborlist])
-        print(f"adding: {len(ids)}")
         for dst, image in zip(ids, images):
             src_id, dst_id, src_image, dst_image = canonize_edge(
                 site_idx, dst, (0, 0, 0), tuple(image)
@@ -184,10 +183,6 @@ def nearest_neighbor_ddg(atoms=None,
             else:
                 edges[(site_idx, dst)].append(tuple(image))
 
-    for i, j in edges:
-        print(f"ID: {(i, j)}")
-        print(f"edges: {edges[(i, j)]}")
-    #  Attempt 1:
     idx_to_keep = set([i[0] for i in groups])
     w = [len(g) / len(sorted_neighbors) for g in groups]
     for i in range(atoms.num_atoms - 1, -1, -1):

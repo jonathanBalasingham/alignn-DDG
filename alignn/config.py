@@ -162,7 +162,7 @@ class TrainingConfig(BaseSettings):
     target: TARGET_ENUM = "formation_energy_peratom"
     atom_features: Literal["basic", "atomic_number", "cfid", "cgcnn"] = "cgcnn"
     neighbor_strategy: Literal[
-        "k-nearest", "voronoi", "radius_graph"
+        "k-nearest", "voronoi", "radius_graph", "ddg"
     ] = "k-nearest"
     id_tag: Literal["jid", "id", "_oqmd_entry_id"] = "jid"
 
