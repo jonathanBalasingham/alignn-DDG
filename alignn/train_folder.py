@@ -18,6 +18,7 @@ device = "cpu"
 if torch.cuda.is_available():
     device = torch.device("cuda")
 
+device = "cpu"
 
 parser = argparse.ArgumentParser(
     description="Atomistic Line Graph Neural Network"

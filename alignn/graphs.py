@@ -185,6 +185,9 @@ def nearest_neighbor_ddg(atoms=None,
 
     idx_to_keep = set([i[0] for i in groups])
     w = [len(g) / len(sorted_neighbors) for g in groups]
+    ew = np.repeat(np.array(w).reshape((-1, 1)), max_neighbors)
+    ew = ew / ew.sum()
+
     for i in range(atoms.num_atoms - 1, -1, -1):
         if i not in idx_to_keep:
             atoms = atoms.remove_site_by_index(i)
@@ -209,8 +212,9 @@ def nearest_neighbor_ddg(atoms=None,
     u = torch.tensor(u)
     v = torch.tensor(v)
     r = torch.tensor(r).type(torch.get_default_dtype())
-    w = torch.tensor(w).reshape((-1, 1))
-    return u, v, r, w, atoms
+    w = torch.tensor(w).reshape((-1, 1)).type(torch.get_default_dtype())
+    ew = torch.tensor(ew).type(torch.get_default_dtype())
+    return u, v, r, w, ew, atoms
 
 
 def nearest_neighbor_edges(
@@ -552,7 +556,7 @@ class Graph(object):
             )
         elif neighbor_strategy == "ddg":
             #  TODO: Need to return weights for vertices and modify atom set
-            u, v, r, w, atoms = nearest_neighbor_ddg(
+            u, v, r, w, ew, atoms = nearest_neighbor_ddg(
                 atoms=atoms,
                 max_neighbors=max_neighbors,
                 use_canonize=use_canonize,
@@ -585,6 +589,7 @@ class Graph(object):
         g.ndata["coords"] = torch.tensor(atoms.cart_coords)
         if w is not None:
             g.ndata["weights"] = w
+            g.edata["weights"] = ew
         if use_lattice_prop:
             lattice_prop = np.array(
                 [atoms.lattice.lat_lengths(), atoms.lattice.lat_angles()]

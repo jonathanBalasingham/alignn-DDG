@@ -244,6 +244,7 @@ def train_dgl(
     device = "cpu"
     if torch.cuda.is_available():
         device = torch.device("cuda")
+    device = "cpu"
     if config.distributed:
         print(
             "Using Accelerator, currently experimental, use at your own risk."
