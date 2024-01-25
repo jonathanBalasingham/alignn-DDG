@@ -318,11 +318,8 @@ class ALIGNN(nn.Module):
 
             # angle features (fixed)
             h = lg.edata.pop("h")
-            print(h)
-            print(torch.max(h))
-            print(torch.min(h))
             z = self.angle_embedding(h)
-            print(z)
+
         if self.config.extra_features != 0:
             features = g.ndata["extra_features"]
             # print('g',g)
@@ -347,7 +344,7 @@ class ALIGNN(nn.Module):
         # ALIGNN updates: update node, edge, triplet features
         for alignn_layer in self.alignn_layers:
             x, y, z = alignn_layer(g, lg, x, y, z, w=w, ew=ew)
-        exit(0)
+
         # gated GCN updates: update node, edge features
         for gcn_layer in self.gcn_layers:
             x, y = gcn_layer(g, x, y, weights=w, edge_weights=ew)
@@ -380,4 +377,5 @@ class ALIGNN(nn.Module):
         if self.classification:
             # out = torch.round(torch.sigmoid(out))
             out = self.softmax(out)
+
         return torch.squeeze(out)

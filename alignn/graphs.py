@@ -74,16 +74,16 @@ def lex_comp(a, b):
 def combine(neighbors, groups):
     grouped_atoms = []
     new_ids = {g: i for i, group in enumerate(groups) for g in group}
+    group_images = defaultdict(list)
     for group in groups:
         replacement_atom = neighbors[group[0]]
-        for i in range(len(replacement_atom)):
-            # ith neighbor -> average distance and replace
+        for i in range(len(replacement_atom)):  # Iterate over each neighbor
             current_distance = 0
             for nid in group:
                 current_distance += neighbors[nid][i][2]
             replacement_atom[i][2] = current_distance / len(group)
-            replacement_atom[i][1] = new_ids[replacement_atom[i][1]]
-            replacement_atom[i][0] = new_ids[replacement_atom[i][0]]
+            #replacement_atom[i][0] = new_ids[replacement_atom[i][0]]
+            #replacement_atom[i][1] = new_ids[replacement_atom[i][1]]
         grouped_atoms.append(replacement_atom)
     return grouped_atoms
 
@@ -168,14 +168,19 @@ def nearest_neighbor_ddg(atoms=None,
     groups = _collapse_into_groups(collapsable)
     sorted_neighbors = [[sorted_neighbors[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)]
     neighbors = combine(sorted_neighbors, groups)
+    idx_to_keep = set([i[0] for i in groups])
+
+    new_distances = np.hstack([np.mean(psuedo_pdd[group], axis=0) for group in groups])
 
     # edges = defaultdict(set)
     edges = defaultdict(list)
-    for site_idx, neighborlist in enumerate(neighbors):
+    for site_idx, neighborlist in enumerate(sorted_neighbors):
+        if site_idx not in idx_to_keep:
+            continue
         ids = np.array([nbr[1] for nbr in neighborlist])
         images = np.array([nbr[3] for nbr in neighborlist])
         for dst, image in zip(ids, images):
-            src_id, dst_id, src_image, dst_image = canonize_edge(
+            src_id, dst_id, _, dst_image = canonize_edge(
                 site_idx, dst, (0, 0, 0), tuple(image)
             )
             if use_canonize:
@@ -183,30 +188,27 @@ def nearest_neighbor_ddg(atoms=None,
             else:
                 edges[(site_idx, dst)].append(tuple(image))
 
-    idx_to_keep = set([i[0] for i in groups])
+    new_ids = {g: i for i, group in enumerate(groups) for g in group}
     w = [len(g) / len(sorted_neighbors) for g in groups]
     ew = np.repeat(np.array(w).reshape((-1, 1)), max_neighbors)
     ew = ew / ew.sum()
 
-    for i in range(atoms.num_atoms - 1, -1, -1):
-        if i not in idx_to_keep:
-            atoms = atoms.remove_site_by_index(i)
-
     u, v, r = [], [], []
     for (src_id, dst_id), images in edges.items():
-        for dst_image in images:
+        for ind, dst_image in enumerate(images):
             # fractional coordinate for periodic image of dst
             dst_coord = atoms.frac_coords[dst_id] + dst_image
             # cartesian displacement vector pointing from src -> dst
             d = atoms.lattice.cart_coords(
                 dst_coord - atoms.frac_coords[src_id]
             )
-            # if np.linalg.norm(d)!=0:
-            # print ('jv',dst_image,d)
-            # add edges for both directions
+            if np.linalg.norm(d) == 0:
+                print(f"On the {ind}-th edge:")
+                print(f"Source: {atoms.frac_coords[src_id]}, Destination: {dst_coord}")
+
             for uu, vv, dd in [(src_id, dst_id, d)]:
-                u.append(uu)
-                v.append(vv)
+                u.append(new_ids[uu])
+                v.append(new_ids[vv])
                 r.append(dd)
     u, v, r = (np.array(x) for x in (u, v, r))
     u = torch.tensor(u)
@@ -214,6 +216,10 @@ def nearest_neighbor_ddg(atoms=None,
     r = torch.tensor(r).type(torch.get_default_dtype())
     w = torch.tensor(w).reshape((-1, 1)).type(torch.get_default_dtype())
     ew = torch.tensor(ew).type(torch.get_default_dtype())
+    for i in range(atoms.num_atoms - 1, -1, -1):
+        if i not in idx_to_keep:
+            atoms = atoms.remove_site_by_index(i)
+
     return u, v, r, w, ew, atoms
 
 
