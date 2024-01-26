@@ -82,8 +82,8 @@ def combine(neighbors, groups):
             for nid in group:
                 current_distance += neighbors[nid][i][2]
             replacement_atom[i][2] = current_distance / len(group)
-            #replacement_atom[i][0] = new_ids[replacement_atom[i][0]]
-            #replacement_atom[i][1] = new_ids[replacement_atom[i][1]]
+            # replacement_atom[i][0] = new_ids[replacement_atom[i][0]]
+            # replacement_atom[i][1] = new_ids[replacement_atom[i][1]]
         grouped_atoms.append(replacement_atom)
     return grouped_atoms
 
@@ -118,6 +118,44 @@ def _collapse_into_groups(overlapping):
     for row_ind, group_num in sorted(group_nums.items()):
         groups[group_num].append(row_ind)
     return list(groups.values())
+
+
+def ddg(g: dgl.graph, collapse_tol=1e-4, edata_key="r"):
+    groups = {int(i): int(i) for i in g.nodes()}
+    e = g.edges()
+    edges = {int(i): defaultdict(list) for i in g.nodes()}
+    for i in range(g.num_edges()):
+        src, dst = int(e[0][i]), int(e[1][i])
+        edges[src][dst].append(np.linalg.norm(g.edata[edata_key][i]))
+
+    for i in range(g.num_nodes() - 1):
+        for j in range(i + 1, g.num_nodes()):
+            if edges[i].keys() != edges[j].keys():
+                continue
+            else:
+                collapsable = []
+                for key in edges[i].keys():
+                    if key == i or key == j:
+                        continue
+
+                    if len(edges[i][key]) != len(edges[j][key]):
+                        collapsable.append(False)
+                    else:
+                        collapsable.append(np.linalg.norm(np.array(edges[i][key]) -
+                                                          np.array(edges[j][key])) < collapse_tol)
+                # check the edges between i and j
+                collapsable.append(np.linalg.norm(np.array(edges[i][i]) -
+                                                  np.array(edges[j][j])) < collapse_tol)
+                collapsable.append(np.linalg.norm(np.array(edges[i][j]) -
+                                                  np.array(edges[j][i])) < collapse_tol)
+                if np.all(collapsable):
+                    groups[j] = groups[i]
+
+    print(groups)
+    for k in groups.keys():
+        if k != groups[k]:
+            g.remove_nodes(k)
+    return g
 
 
 def nearest_neighbor_ddg(atoms=None,
@@ -559,7 +597,6 @@ class Graph(object):
                 atoms, cutoff=cutoff, cutoff_extra=cutoff_extra
             )
         elif neighbor_strategy == "ddg":
-            #  TODO: Need to return weights for vertices and modify atom set
             u, v, r, w, ew, atoms = nearest_neighbor_ddg(
                 atoms=atoms,
                 max_neighbors=max_neighbors,
@@ -618,6 +655,10 @@ class Graph(object):
             # and add bond angle cosines as edge features
             lg = g.line_graph(shared=True)
             lg.apply_edges(compute_bond_cosines)
+            if "weights" in g.ndata:
+                nn, ne = lg.num_nodes(), lg.num_edges()
+                lg.ndata["weights"] = torch.Tensor([1/nn for _ in range(nn)]).type(torch.get_default_dtype()).reshape((-1, 1))
+                lg.edata["weights"] = torch.Tensor([1/ne for _ in range(ne)]).type(torch.get_default_dtype()).reshape((-1, 1))
             return g, lg
         else:
             return g
