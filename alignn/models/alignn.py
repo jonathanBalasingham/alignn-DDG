@@ -355,7 +355,7 @@ class ALIGNN(nn.Module):
 
         # ALIGNN updates: update node, edge, triplet features
         for alignn_layer in self.alignn_layers:
-            x, y, z = alignn_layer(g, lg, x, y, z, w=w, ew=ew, lgw=lgw, lgew=lgew)
+            x, y, z = alignn_layer(g, lg, x, y, z, w=w, ew=ew, lgw=ew, lgew=lgew)
 
         # gated GCN updates: update node, edge features
         for gcn_layer in self.gcn_layers:

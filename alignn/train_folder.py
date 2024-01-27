@@ -18,6 +18,10 @@ device = "cpu"
 if torch.cuda.is_available():
     device = torch.device("cuda")
 
+torch.manual_seed(1)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(1)
+
 device = "cpu"
 
 parser = argparse.ArgumentParser(
