@@ -228,7 +228,7 @@ def nearest_neighbor_ddg(atoms=None,
 
     new_ids = {g: i for i, group in enumerate(groups) for g in group}
     w = [len(g) / len(sorted_neighbors) for g in groups]
-    ew = np.repeat(np.array(w).reshape((-1, 1)), max_neighbors)
+    ew = np.repeat(np.array(w).reshape((-1, 1)), max_neighbors*2)
     ew = ew / ew.sum()
 
     u, v, r = [], [], []
@@ -244,7 +244,7 @@ def nearest_neighbor_ddg(atoms=None,
                 print(f"On the {ind}-th edge:")
                 print(f"Source: {atoms.frac_coords[src_id]}, Destination: {dst_coord}")
 
-            for uu, vv, dd in [(src_id, dst_id, d)]:
+            for uu, vv, dd in [(src_id, dst_id, d), (dst_id, src_id, -d)]:
                 u.append(new_ids[uu])
                 v.append(new_ids[vv])
                 r.append(dd)
@@ -583,6 +583,7 @@ class Graph(object):
     ):
         """Obtain a DGLGraph for Atoms object."""
         # print('id',id)
+
         if neighbor_strategy == "k-nearest":
             edges = nearest_neighbor_edges(
                 atoms=atoms,
@@ -631,7 +632,7 @@ class Graph(object):
         if w is not None:
             g.ndata["weights"] = w
         if ew is not None:
-            g.edata["weights"] = ew
+            g.edata["edge_weights"] = ew
         if use_lattice_prop:
             lattice_prop = np.array(
                 [atoms.lattice.lat_lengths(), atoms.lattice.lat_angles()]
@@ -655,10 +656,10 @@ class Graph(object):
             # and add bond angle cosines as edge features
             lg = g.line_graph(shared=True)
             lg.apply_edges(compute_bond_cosines)
-            if "weights" in g.ndata:
+            if neighbor_strategy == "ddg":
                 nn, ne = lg.num_nodes(), lg.num_edges()
                 lg.ndata["weights"] = torch.Tensor([1/nn for _ in range(nn)]).type(torch.get_default_dtype()).reshape((-1, 1))
-                lg.edata["weights"] = torch.Tensor([1/ne for _ in range(ne)]).type(torch.get_default_dtype()).reshape((-1, 1))
+                lg.edata["edge_weights"] = torch.Tensor([1/ne for _ in range(ne)]).type(torch.get_default_dtype()).reshape((-1, 1))
             return g, lg
         else:
             return g
@@ -1055,6 +1056,12 @@ class StructureDataset(torch.utils.data.Dataset):
             for g in tqdm(graphs):
                 lg = g.line_graph(shared=True)
                 lg.apply_edges(compute_bond_cosines)
+                if "weights" in g.ndata:
+                    nn, ne = lg.num_nodes(), lg.num_edges()
+                    lg.ndata["weights"] = torch.Tensor([1 / nn for _ in range(nn)]).type(
+                        torch.get_default_dtype()).reshape((-1, 1))
+                    lg.edata["edge_weights"] = torch.Tensor([1 / ne for _ in range(ne)]).type(
+                        torch.get_default_dtype()).reshape((-1, 1))
                 self.line_graphs.append(lg)
 
         if classification:

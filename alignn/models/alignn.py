@@ -166,6 +166,8 @@ class ALIGNNConv(nn.Module):
             z: torch.Tensor,
             w: torch.Tensor = None,
             ew: torch.Tensor = None,
+            lgw: torch.Tensor = None,
+            lgew: torch.Tensor = None,
     ):
         """Node and Edge updates for ALIGNN layer.
 
@@ -178,7 +180,7 @@ class ALIGNNConv(nn.Module):
         # Edge-gated graph convolution update on crystal graph
         x, m = self.node_update(g, x, y, weights=w, edge_weights=ew)
         # Edge-gated graph convolution update on crystal graph
-        y, z = self.edge_update(lg, m, z)  # TODO: Update this with vertex-weighted line graph
+        y, z = self.edge_update(lg, m, z, weights=lgw, edge_weights=lgew)
         return x, y, z
 
 
@@ -339,11 +341,21 @@ class ALIGNN(nn.Module):
         ew = None
         if "weights" in g.ndata:
             w = g.ndata["weights"]
-        if "weights" in g.edata:
-            ew = g.edata["weights"]
+
+        if "edge_weights" in g.edata:
+            ew = g.edata["edge_weights"]
+
+        lgw = None
+        lgew = None
+        if "weights" in lg.ndata:
+            lgw = lg.ndata["weights"]
+
+        if "edge_weights" in lg.edata:
+            lgew = lg.edata["edge_weights"]
+
         # ALIGNN updates: update node, edge, triplet features
         for alignn_layer in self.alignn_layers:
-            x, y, z = alignn_layer(g, lg, x, y, z, w=w, ew=ew)
+            x, y, z = alignn_layer(g, lg, x, y, z, w=w, ew=ew, lgw=lgw, lgew=lgew)
 
         # gated GCN updates: update node, edge features
         for gcn_layer in self.gcn_layers:
