@@ -2,9 +2,9 @@
 from jarvis.db.figshare import data as jdata
 from jarvis.core.atoms import Atoms
 
-dft_3d = jdata("dft_3d")
-prop = "optb88vdw_bandgap"
-max_samples = 50
+dft_3d = jdata("dft_2d")
+prop = "optb88vdw_total_energy"
+max_samples = 5000
 f = open("id_prop.csv", "w")
 count = 0
 for i in dft_3d:

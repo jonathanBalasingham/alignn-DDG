@@ -2,11 +2,12 @@
 # import dgl
 import torch
 from dgl.nn import AvgPooling, GraphConv
-from pydantic.typing import Literal
+from typing import Literal
 from torch import nn
 from torch.nn import functional as F
 
 from alignn.utils import BaseSettings
+from pydantic_settings import SettingsConfigDict
 
 
 class SimpleGCNConfig(BaseSettings):
@@ -17,11 +18,7 @@ class SimpleGCNConfig(BaseSettings):
     weight_edges: bool = True
     width: int = 64
     output_features: int = 1
-
-    class Config:
-        """Configure model settings behavior."""
-
-        env_prefix = "jv_model"
+    model_config = SettingsConfigDict(env_prefix="jv_model")
 
 
 class SimpleGCN(nn.Module):

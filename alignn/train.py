@@ -244,7 +244,7 @@ def train_dgl(
     device = "cpu"
     if torch.cuda.is_available():
         device = torch.device("cuda")
-    device = "cpu"
+    #device = "cpu"
     if config.distributed:
         print(
             "Using Accelerator, currently experimental, use at your own risk."
@@ -1224,6 +1224,9 @@ def train_dgl(
             "Test MAE:",
             mean_absolute_error(np.array(targets), np.array(predictions)),
         )
+        with open("res.txt", "a") as f:
+            f.write(f"Test MAE: {str(mean_absolute_error(np.array(targets), np.array(predictions)))} \n")
+
         if config.store_outputs and not classification:
             # save training targets and predictions here
             # TODO: Add IDs

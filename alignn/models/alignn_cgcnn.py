@@ -8,12 +8,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from dgl.nn import AvgPooling
-from pydantic.typing import Literal
+from typing import Literal
 from torch import nn
 
 # import torch
 from alignn.models.utils import RBFExpansion
 from alignn.utils import BaseSettings
+from pydantic_settings import SettingsConfigDict
 
 
 def compute_bond_cosines(edges):
@@ -49,11 +50,7 @@ class ACGCNNConfig(BaseSettings):
     link: Literal["identity", "log", "logit"] = "identity"
     zero_inflated: bool = False
     classification: bool = False
-
-    class Config:
-        """Configure model settings behavior."""
-
-        env_prefix = "jv_model"
+    model_config = SettingsConfigDict(env_prefix="jv_model")
 
 
 class ACGCNNConv(nn.Module):

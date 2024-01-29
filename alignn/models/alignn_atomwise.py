@@ -11,12 +11,13 @@ from dgl.nn import AvgPooling
 import torch
 
 # from dgl.nn.functional import edge_softmax
-from pydantic.typing import Literal
+from typing import Literal
 from torch import nn
 from torch.nn import functional as F
 from alignn.models.utils import RBFExpansion
 from alignn.graphs import compute_bond_cosines
 from alignn.utils import BaseSettings
+from pydantic_settings import SettingsConfigDict
 
 
 class ALIGNNAtomWiseConfig(BaseSettings):
@@ -55,11 +56,7 @@ class ALIGNNAtomWiseConfig(BaseSettings):
     lg_on_fly: bool = False  # will make True as default soon
     batch_stress: bool = True
     extra_features: int = 0
-
-    class Config:
-        """Configure model settings behavior."""
-
-        env_prefix = "jv_model"
+    model_config = SettingsConfigDict(env_prefix="jv_model")
 
 
 def cutoff_function_based_edges_old(r, inner_cutoff=4):

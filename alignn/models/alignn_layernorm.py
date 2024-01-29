@@ -11,12 +11,13 @@ import torch
 from dgl.nn import AvgPooling
 
 # from dgl.nn.functional import edge_softmax
-from pydantic.typing import Literal
+from typing import Literal
 from torch import nn
 from torch.nn import functional as F
 
 from alignn.models.utils import RBFExpansion
 from alignn.utils import BaseSettings
+from pydantic_settings import SettingsConfigDict
 
 
 class ALIGNNConfig(BaseSettings):
@@ -39,11 +40,7 @@ class ALIGNNConfig(BaseSettings):
     link: Literal["identity", "log", "logit"] = "identity"
     zero_inflated: bool = False
     classification: bool = False
-
-    class Config:
-        """Configure model settings behavior."""
-
-        env_prefix = "jv_model"
+    model_config = SettingsConfigDict(env_prefix="jv_model")
 
 
 class EdgeGatedGraphConv(nn.Module):

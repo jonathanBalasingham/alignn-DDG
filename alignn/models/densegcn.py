@@ -4,11 +4,12 @@ from typing import List, Optional
 import dgl
 import torch
 from dgl.nn import AvgPooling, GraphConv
-from pydantic.typing import Literal
+from typing import Literal
 from torch import nn
 from torch.nn import functional as F
 
 from alignn.utils import BaseSettings
+from pydantic_settings import SettingsConfigDict
 
 
 class DenseGCNConfig(BaseSettings):
@@ -23,11 +24,7 @@ class DenseGCNConfig(BaseSettings):
     growth_rate: int = 32
     output_features: int = 1
     classification: bool = False
-
-    class Config:
-        """Configure model settings behavior."""
-
-        env_prefix = "jv_model"
+    model_config = SettingsConfigDict(env_prefix="jv_model")
 
 
 class _DenseLayer(nn.Module):

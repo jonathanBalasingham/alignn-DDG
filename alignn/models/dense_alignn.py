@@ -10,13 +10,14 @@ import dgl.function as fn
 import numpy as np
 import torch
 from dgl.nn import AvgPooling
-from pydantic import root_validator
-from pydantic.typing import Literal
+from pydantic import model_validator
+from typing import Literal
 from torch import nn
 from torch.nn import functional as F
 
 from alignn.models.utils import RBFExpansion
 from alignn.utils import BaseSettings
+from pydantic_settings import SettingsConfigDict
 
 
 class DenseALIGNNConfig(BaseSettings):
@@ -44,12 +45,17 @@ class DenseALIGNNConfig(BaseSettings):
     zero_inflated: bool = False
     classification: bool = False
 
-    @root_validator()
+    @model_validator(mode='after')
+    @classmethod
     def ensure_residual_dimensions_match(cls, values):
         """Check that residual connections are allowed."""
-        initial_features = values.get("initial_features")
-        bottleneck_features = values.get("bottleneck_features")
-        residual = values.get("residual")
+        print(values.initial_features)
+        initial_features = values.initial_features
+        bottleneck_features = values.bottleneck_features
+        residual = values.residual
+        #initial_features = values.get("initial_features")
+        #bottleneck_features = values.get("bottleneck_features")
+        #residual = values.get("residual")
         if residual:
             if initial_features != bottleneck_features:
                 raise ValueError(
@@ -57,11 +63,7 @@ class DenseALIGNNConfig(BaseSettings):
                 )
 
         return values
-
-    class Config:
-        """Configure model settings behavior."""
-
-        env_prefix = "jv_model"
+    model_config = SettingsConfigDict(env_prefix="jv_model")
 
 
 class EdgeGatedGraphConv(nn.Module):

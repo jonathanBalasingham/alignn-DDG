@@ -11,13 +11,14 @@ import torch
 from dgl.nn import AvgPooling, SumPooling
 
 # from dgl.nn.functional import edge_softmax
-from pydantic.typing import Literal
+from typing import Literal
 from torch import nn
 from torch.nn import functional as F
 
 from alignn.models.utils import RBFExpansion
 from alignn.utils import BaseSettings
 from alignn.models.WeightedBatchNorm1d import WeightedBatchNorm1d
+from pydantic_settings import SettingsConfigDict
 
 
 class ALIGNNConfig(BaseSettings):
@@ -42,11 +43,7 @@ class ALIGNNConfig(BaseSettings):
     classification: bool = False
     num_classes: int = 2
     extra_features: int = 0
-
-    class Config:
-        """Configure model settings behavior."""
-
-        env_prefix = "jv_model"
+    model_config = SettingsConfigDict(env_prefix="jv_model")
 
 
 class EdgeGatedGraphConv(nn.Module):
@@ -347,11 +344,11 @@ class ALIGNN(nn.Module):
 
         lgw = None
         lgew = None
-        if "weights" in lg.ndata:
-            lgw = lg.ndata["weights"]
+        #if "weights" in lg.ndata:
+        #    lgw = lg.ndata["weights"]
 
-        if "edge_weights" in lg.edata:
-            lgew = lg.edata["edge_weights"]
+        #if "edge_weights" in lg.edata:
+        #    lgew = lg.edata["edge_weights"]
 
         # ALIGNN updates: update node, edge, triplet features
         for alignn_layer in self.alignn_layers:

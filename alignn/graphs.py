@@ -228,7 +228,7 @@ def nearest_neighbor_ddg(atoms=None,
 
     new_ids = {g: i for i, group in enumerate(groups) for g in group}
     w = [len(g) / len(sorted_neighbors) for g in groups]
-    ew = np.repeat(np.array(w).reshape((-1, 1)), max_neighbors*2)
+    ew = np.repeat(np.array(w).reshape((-1, 1)), max_neighbors)
     ew = ew / ew.sum()
 
     u, v, r = [], [], []
@@ -244,7 +244,7 @@ def nearest_neighbor_ddg(atoms=None,
                 print(f"On the {ind}-th edge:")
                 print(f"Source: {atoms.frac_coords[src_id]}, Destination: {dst_coord}")
 
-            for uu, vv, dd in [(src_id, dst_id, d), (dst_id, src_id, -d)]:
+            for uu, vv, dd in [(src_id, dst_id, d)]: #, (dst_id, src_id, -d)]:
                 u.append(new_ids[uu])
                 v.append(new_ids[vv])
                 r.append(dd)
@@ -359,7 +359,7 @@ def build_undirected_edgedata(
             # if np.linalg.norm(d)!=0:
             # print ('jv',dst_image,d)
             # add edges for both directions
-            for uu, vv, dd in [(src_id, dst_id, d), (dst_id, src_id, -d)]:
+            for uu, vv, dd in [(src_id, dst_id, d)]: #, (dst_id, src_id, -d)]:
                 u.append(uu)
                 v.append(vv)
                 r.append(dd)
@@ -659,7 +659,7 @@ class Graph(object):
             if neighbor_strategy == "ddg":
                 nn, ne = lg.num_nodes(), lg.num_edges()
                 lg.ndata["weights"] = torch.Tensor([1/nn for _ in range(nn)]).type(torch.get_default_dtype()).reshape((-1, 1))
-                lg.edata["edge_weights"] = torch.Tensor([1/ne for _ in range(ne)]).type(torch.get_default_dtype()).reshape((-1, 1))
+                #lg.edata["edge_weights"] = torch.Tensor([1/ne for _ in range(ne)]).type(torch.get_default_dtype()).reshape((-1, 1))
             return g, lg
         else:
             return g
