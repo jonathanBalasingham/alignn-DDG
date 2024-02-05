@@ -4,7 +4,7 @@ from jarvis.core.specie import Specie
 from jarvis.core.utils import random_colors
 import numpy as np
 import pandas as pd
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 from jarvis.analysis.structure.neighbors import NeighborsAnalysis
 from jarvis.core.specie import chem_data, get_node_attributes
 import math
@@ -120,8 +120,86 @@ def _collapse_into_groups(overlapping):
     return list(groups.values())
 
 
-def ddg(g: dgl.graph, collapse_tol=1e-4, edata_key="r"):
-    groups = {int(i): int(i) for i in g.nodes()}
+def to_dg(g: dgl.graph, collapse_tol=1e-4, is_line_graph=False, mutate_graph=False):
+    if is_line_graph:
+        node_types = torch.norm(g.ndata["r"], dim=1).numpy()
+    else:
+        node_types = g.ndata["atom_types"].numpy()
+    e = g.edges()
+    ne = g.num_edges()
+    subgraph_types = defaultdict(list)
+    sig_dig = int(-np.log10(collapse_tol))
+    node_types = np.round(node_types, sig_dig)
+    if is_line_graph:
+        edata = np.round(g.edata["h"].numpy(), sig_dig)
+    else:
+        edata = np.round(torch.norm(g.edata["r"], dim=1).numpy(), sig_dig)
+
+    for i in range(ne):
+        src, dst = int(e[0][i]), int(e[1][i])
+        dest_type = node_types[dst]
+        edge_type = edata[i]
+        subgraph_types[src].append((node_types[src], dest_type, edge_type))
+
+    subgraphs = defaultdict(Counter)
+    for node_id in subgraph_types.keys():
+        subgraphs[node_id] = Counter(subgraph_types[node_id])
+
+    nn = g.num_nodes()
+    group_map = {int(i): int(i) for i in range(nn)}
+    for i in range(nn - 1):
+        for j in range(i + 1, nn):
+            if node_types[i] == node_types[j]:
+                if subgraphs[i] == subgraphs[j]:
+                    group_map[j] = group_map[i]
+
+    groups = defaultdict(list)
+    for k in group_map.keys():
+        groups[group_map[k]].append(k)
+
+    nn = g.num_nodes()
+    weights = g.ndata["weights"].numpy() if "weights" in g.ndata else np.array([1 / nn for _ in range(nn)])[:, None]
+    combined_weights = [np.sum(weights[groups[group]]) for group in groups.keys()]
+    vertex_weights = torch.tensor(combined_weights).type(torch.get_default_dtype())
+
+    if mutate_graph:
+        for edge_idx in range(g.num_edges()):
+            g.edges()[1][edge_idx] = group_map[g.edges()[1][edge_idx].item()]
+
+        g.remove_nodes([k for k in group_map.keys() if group_map[k] != k])
+        g.ndata["weights"] = vertex_weights
+    return g, groups, group_map
+
+
+def group_edges(g, lg_groups):
+    # this take the groups created from finding the dg of the line graph
+    # and groups the edges of the original graph accordingly
+    edges_to_remove = [val for group in lg_groups.values() for val in group if val not in lg_groups.keys()]
+    ne = g.num_edges()
+    weights = g.edata["edge_weights"].numpy() if "edge_weights" in g.edata else np.array([1 / ne for _ in range(ne)])[:,
+                                                                                None]
+    ew = [np.sum(weights[lg_groups[group]]) for group in lg_groups.keys()]
+    g.remove_edges(edges_to_remove)
+    g.edata["edge_weights"] = torch.tensor(ew)[:, None].type(torch.get_default_dtype())
+
+
+def group_vertices(lg, g_groups, group_map):
+    # this takes the groups created from finding the dg of the original graph
+    # and groups the vertices of the line graph accordingly
+    vertices_to_remove = [val for group in g_groups.values() for val in group if val not in g_groups.keys()]
+    nn = lg.num_nodes()
+    print(nn)
+    weights = lg.ndata["weights"].numpy() if "weights" in lg.ndata else np.array([1 / nn for _ in range(nn)])[:, None]
+    w = [np.sum(weights[g_groups[group]]) for group in g_groups.keys()]
+    for i in range(lg.edges()[1].shape[0]):
+        lg.edges()[1][i] = group_map[lg.edges()[1][i].item()]
+    lg.remove_nodes(vertices_to_remove)
+    lg.ndata["weights"] = torch.tensor(w)[:, None].type(torch.get_default_dtype())
+
+
+
+def ddg(g: dgl.graph, collapse_tol=1e-4, edata_key="r", ndata_key="atom_features"):
+    group_map = {int(i): int(i) for i in g.nodes()}
     e = g.edges()
     edges = {int(i): defaultdict(list) for i in g.nodes()}
     for i in range(g.num_edges()):
@@ -130,6 +208,9 @@ def ddg(g: dgl.graph, collapse_tol=1e-4, edata_key="r"):
 
     for i in range(g.num_nodes() - 1):
         for j in range(i + 1, g.num_nodes()):
+            if ndata_key is not None:
+                if torch.all(g.ndata[ndata_key][i] != g.ndata[ndata_key][j]).item():
+                    continue
             if edges[i].keys() != edges[j].keys():
                 continue
             else:
@@ -143,26 +224,94 @@ def ddg(g: dgl.graph, collapse_tol=1e-4, edata_key="r"):
                     else:
                         collapsable.append(np.linalg.norm(np.array(edges[i][key]) -
                                                           np.array(edges[j][key])) < collapse_tol)
-                # check the edges between i and j
-                collapsable.append(np.linalg.norm(np.array(edges[i][i]) -
-                                                  np.array(edges[j][j])) < collapse_tol)
-                collapsable.append(np.linalg.norm(np.array(edges[i][j]) -
-                                                  np.array(edges[j][i])) < collapse_tol)
-                if np.all(collapsable):
-                    groups[j] = groups[i]
 
-    print(groups)
-    for k in groups.keys():
-        if k != groups[k]:
-            g.remove_nodes(k)
+                if len(edges[i][i]) != len(edges[j][j]) or len(edges[i][j]) != len(edges[j][i]):
+                    collapsable.append(False)
+                else:
+                    collapsable.append(np.linalg.norm(np.array(edges[i][i]) -
+                                                      np.array(edges[j][j])) < collapse_tol)
+                    collapsable.append(np.linalg.norm(np.array(edges[i][j]) -
+                                                      np.array(edges[j][i])) < collapse_tol)
+
+                if np.all(collapsable):
+                    group_map[j] = group_map[i]
+
+    groups = defaultdict(list)
+    for k in group_map.keys():
+        groups[group_map[k]].append(k)
+
+    nn = g.num_nodes()
+    weights = g.ndata["weights"].numpy() if "weights" in g.ndata else np.array([1 / nn for _ in range(nn)])[:, None]
+    combined_weights = [np.sum(weights[groups[group]]) for group in groups.keys()]
+
+    for edge_idx in range(g.num_edges()):
+        g.edges()[1][edge_idx] = group_map[g.edges()[1][edge_idx].item()]
+
+    g.remove_nodes([k for k in group_map.keys() if group_map[k] != k])
     return g
 
 
-def nearest_neighbor_ddg(atoms=None,
-                         max_neighbors=12,
-                         cutoff=8,
-                         collapse_tol=1e-4,
-                         use_canonize=False):
+"""
+c = []
+b = []
+for i in tqdm(d):
+    g, lg = Graph.atom_dgl_multigraph(Atoms.from_dict(i['atoms']), neighbor_strategy='k-nearest', max_neighbors=12)
+    c.append((g.num_nodes(), g.num_edges(), lg.num_nodes(), lg.num_edges()))
+    g, lg = Graph.atom_dgl_multigraph(Atoms.from_dict(i['atoms']), neighbor_strategy='ddg', max_neighbors=12)
+    lg = ddg(lg, edata_key="h", ndata_key=None)
+    b.append((g.num_nodes(), g.num_edges(), lg.num_nodes(), lg.num_edges()))
+    
+decrease = []    
+for i in range(len(b)):
+    decrease.append((b[i][0]/c[i][0], b[i][1]/c[i][1], b[i][2]/c[i][2], b[i][3]/c[i][3]))
+    
+c = []
+b = []
+for i in tqdm(d):
+    g, lg = Graph.atom_dgl_multigraph(Atoms.from_dict(i['atoms']), neighbor_strategy='k-nearest', max_neighbors=12)
+    c.append((lg.num_nodes(), lg.num_edges()))
+    lg = ddg(lg, edata_key="h", ndata_key=None)
+    b.append((lg.num_nodes(), lg.num_edges()))
+
+decrease = []    
+for i in range(len(b)):
+    decrease.append((b[i][0]/c[i][0], b[i][1]/c[i][1]))
+  
+c = []
+b = []
+for i in tqdm(d):
+    g, lg = Graph.atom_dgl_multigraph(Atoms.from_dict(i['atoms']), neighbor_strategy='k-nearest', max_neighbors=12)
+    c.append((g.num_nodes(), g.num_edges(), lg.num_nodes(), lg.num_edges()))
+    collapse(g, lg)
+    g, lg = ddlg(g), ddlg(lg, is_line_graph=True)
+    b.append((g.num_nodes(), g.num_edges(), lg.num_nodes(), lg.num_edges()))
+    
+decrease = []    
+for i in range(len(b)):
+    decrease.append((b[i][0]/c[i][0], b[i][1]/c[i][1], b[i][2]/c[i][2], b[i][3]/c[i][3]))
+
+reduction = []
+for i in tqdm(data):
+    g, lg = Graph.atom_dgl_multigraph(Atoms.from_dict(i['atoms']), neighbor_strategy='ddg', max_neighbors=24)
+    reduction.append(collapse(g, lg))
+"""
+
+
+
+def lexsort(keys, dim=-1):
+    if keys.ndim < 2:
+        raise ValueError(f"keys must be at least 2 dimensional, but {keys.ndim=}.")
+    if len(keys) == 0:
+        raise ValueError(f"Must have at least 1 key, but {len(keys)=}.")
+    idx = keys[0].argsort(dim=dim, stable=True)
+    for k in keys[1:]:
+        idx = idx.gather(dim, k.gather(dim, idx).argsort(dim=dim, stable=True))
+    return idx
+
+
+def get_neighbors(atoms=None,
+                  max_neighbors=12,
+                  cutoff=8):
     all_neighbors = atoms.get_all_neighbors(r=cutoff)
     min_nbrs = min(len(neighborlist) for neighborlist in all_neighbors)
 
@@ -172,43 +321,222 @@ def nearest_neighbor_ddg(atoms=None,
             r_cut = max(lat.a, lat.b, lat.c)
         else:
             r_cut = 2 * cutoff
-        return nearest_neighbor_ddg(
-            atoms=atoms,
-            cutoff=r_cut,
-            max_neighbors=max_neighbors,
-        )
+        return get_neighbors(atoms, max_neighbors=max_neighbors, cutoff=r_cut)
 
     neighbor_distances = [np.sort([n[2] for n in nl]) for nl in all_neighbors]
     neighbors_okay = np.all([check_neighbors(nl, max_neighbors) for nl in neighbor_distances])
 
     if not np.all(neighbors_okay):
-        return nearest_neighbor_ddg(
-            atoms=atoms,
-            cutoff=2 * cutoff,
-            max_neighbors=max_neighbors,
-        )
+        return get_neighbors(atoms, max_neighbors=max_neighbors, cutoff=cutoff * 2)
+    return all_neighbors, neighbor_distances
+
+
+def distribution_graphs(atoms=None,
+         max_neighbors=12,
+         cutoff=8,
+         collapse_tol=1e-4,
+         angle_collapse_tol=1e-3,
+         backwards_edges=False,
+         verbosity=0):
+    all_neighbors, neighbor_distances = get_neighbors(atoms, max_neighbors=max_neighbors, cutoff=cutoff)
+    all_neighbors = [sorted(n, key=lambda x: x[2]) for n in all_neighbors]
+
+    neighbor_indices = [[l[1] for l in nl] for nl in all_neighbors]
+    an = np.array(atoms.atomic_numbers)
+    neighbor_atomic_numbers = [an[indx] for indx in neighbor_indices]
+    distance_an_pairs = [list(zip(d, a)) for d, a in zip(neighbor_distances, neighbor_atomic_numbers)]
+    final_neighbor_indices = [[i for i, x in sorted(enumerate(pair), key=lambda x: x[1])][:max_neighbors] for pair
+                              in distance_an_pairs]
+    all_neighbors = [[all_neighbors[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)]
+    if verbosity > 0:
+        print(f"Size of motif: {len(all_neighbors)}")
+        if verbosity > 1:
+            print(all_neighbors)
+
+    atomic_num_mat = np.vstack(
+        [[neighbor_atomic_numbers[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)])
+    psuedo_pdd = np.vstack(
+        [[neighbor_distances[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)])
+
+    overlapping = pdist(psuedo_pdd, metric='chebyshev') <= collapse_tol
+    g_types_match = pdist(an.reshape((-1, 1))) == 0
+    g_neighbors_match = (pdist(atomic_num_mat) == 0)
+    g_collapsable = overlapping & g_types_match & g_neighbors_match
+    if verbosity > 1:
+        print(g_collapsable)
+
+    # Angles
+    combos = [[(neighbors[i][2], neighbors[j][2], an[neighbors[i][1]], an[neighbors[j][1]], i, j)
+               for i in range(max_neighbors - 1) for j in range(i + 1, max_neighbors)] for neighbors in all_neighbors]
+
+    if verbosity > 1:
+        print(f"Number of possible combos: {len(combos[0])}")
+    combo_indices = [[i for i, x in sorted(enumerate(combo), key=lambda x: x[1])] for combo
+                     in combos]
+
+    ordered_pairs = [[combos[i][ind][-2:] for ind in combo_indices[i]] for i in range(len(combo_indices))]
+    angle_pairs = {i: [(all_neighbors[i][pair[0]], all_neighbors[i][pair[1]]) for pair in op]
+                   for i, op in enumerate(ordered_pairs)}
+
+    if verbosity > 1:
+        print(f"Number of angle pairs per motif point: {len(angle_pairs[0])}")
+    rs = []
+    etypes = []
+    ntypes = []
+    for (src_id, dst_angle_pairs) in angle_pairs.items():
+        for nbr_a, nbr_b in dst_angle_pairs:
+            dst_id_a = nbr_a[1]
+            dst_id_b = nbr_b[1]
+            dst_coord_a = atoms.frac_coords[dst_id_a] + nbr_a[-1]
+            dst_coord_b = atoms.frac_coords[dst_id_b] + nbr_b[-1]
+            d_a = atoms.lattice.cart_coords(dst_coord_a - atoms.frac_coords[src_id])
+            d_b = atoms.lattice.cart_coords(dst_coord_b - atoms.frac_coords[src_id])
+            rs.append([d_a, d_b])
+            etypes.append([min(an[dst_id_a], an[dst_id_b]), max(an[dst_id_a], an[dst_id_b])])
+            distance1 = np.linalg.norm(d_a)
+            distance2 = np.linalg.norm(d_b)
+            ntypes.append([np.min(distance1), np.max(distance2)])
+
+    p = torch.tensor(np.array(rs)).type(torch.get_default_dtype())
+    angles = bond_cosines(p[:, 0, :], p[:, 1, :]).reshape((len(all_neighbors), -1))
+    original_angles = np.copy(angles)
+    angles, order = torch.sort(angles, dim=1)
+
+    if verbosity > 1:
+        print(f"Size of angle matrix: {angles.shape}")
+
+    lg_nodes_match = pdist(angles.numpy()[:, :], metric='chebyshev') < angle_collapse_tol
+    etypes = torch.tensor(etypes).reshape((len(all_neighbors), -1, 2))
+    etypes = etypes[torch.arange(etypes.shape[0]).unsqueeze(-1), order].reshape((len(all_neighbors), -1)).numpy()
+    etypes_match = pdist(etypes[:, :], metric='chebychev') < 1e-8
+
+    ntypes = torch.tensor(ntypes).reshape((len(all_neighbors), -1, 2))
+    ntypes = ntypes[torch.arange(ntypes.shape[0]).unsqueeze(-1), order].reshape((len(all_neighbors), -1)).numpy()
+    ntypes_match = pdist(ntypes[:, :], metric='chebychev') < collapse_tol
+
+    collapsable = g_collapsable & lg_nodes_match & etypes_match & ntypes_match
+    groups = _collapse_into_groups(collapsable)
+    group_map = {g: i for i, group in enumerate(groups) for g in group}
+
+    if verbosity > 0:
+        print(f"Number of groups: {len(groups)}")
+        if verbosity > 1:
+            print(groups)
+
+    m = len(all_neighbors)
+    weights = np.full((m,), 1 / m, dtype=np.float64)
+    weights = np.array([np.sum(weights[group]) for group in groups])
+    dists = np.array(
+        [np.average(psuedo_pdd[group], axis=0) for group in groups],
+        dtype=np.float64
+    )
+
+    angles = np.array(
+        [np.average(original_angles[group], axis=0) for group in groups],
+        dtype=np.float64
+    )
+
+    u, v, edata, r = [], [], [], []
+    edge_map = {}
+    edge_id = 0
+    for site_idx, group in enumerate(groups):
+        neighborlist = all_neighbors[group[0]]
+        ids = np.array([group_map[nbr[1]] for nbr in neighborlist])
+        distances = dists[site_idx]
+        for i, (dst, distance) in enumerate(zip(ids, distances)):
+            u.append(site_idx)
+            v.append(dst)
+            edata.append(distance)
+            edge_map[(site_idx, i)] = edge_id
+            edge_id += 1
+            neighbor = all_neighbors[group[0]][i]
+            dst_id_a = neighbor[1]
+            dst_coord_a = atoms.frac_coords[dst_id_a] + neighbor[-1]
+            d = atoms.lattice.cart_coords(dst_coord_a - atoms.frac_coords[neighbor[0]])
+            r.append(d)
+
+    if verbosity > 1:
+        print(edge_map)
+    g = dgl.graph((u, v))
+    g.edata["distances"] = torch.tensor(edata).type(torch.get_default_dtype())
+    g.ndata["weights"] = torch.tensor(weights).type(torch.get_default_dtype())
+    g.edata["r"] = torch.tensor(np.array(r)).type(torch.get_default_dtype())
+
+    lg_u, lg_v, lg_edata = [], [], []
+    idx_to_keep = set([group[0] for group in groups])
+    if verbosity > 0:
+        print(f"Size of ordered pairs: {len(ordered_pairs[0])}")
+
+    for i, pairs in enumerate(ordered_pairs):
+        if verbosity > 0:
+            print(f"Checking if {i} in {idx_to_keep}")
+        if i in idx_to_keep:
+            for id1, id2 in pairs:
+                if verbosity > 2:
+                    print(f"Angle Triplet: {(i, id1, id2)}")
+                lg_u.append(edge_map[(group_map[i], id1)])
+                lg_v.append(edge_map[(group_map[i], id2)])
+
+    lg = dgl.graph((lg_u, lg_v))
+    lg.edata["h"] = torch.tensor(angles.reshape((-1)))
+    return g, lg
+
+
+"""
+dec = []
+dec2 = []
+ind = 0
+for i in tqdm(d):
+    a = Atoms.from_dict(i['atoms'])
+    g, lg = test(a, max_neighbors=24)
+    if g.num_nodes() == 0 or lg.num_nodes == 0:
+        print(ind)
+        continue
+    #g2, lg2 = Graph.atom_dgl_multigraph(a, neighbor_strategy='k-nearest', max_neighbors=12, collapse=False)
+    #dec.append(lg.num_nodes() / lg2.num_nodes())
+    #dec2.append(lg.num_edges() / lg2.num_edges())
+    ind += 1
+"""
+
+
+def nearest_neighbor_ddg(atoms=None,
+                         max_neighbors=12,
+                         cutoff=8,
+                         collapse=False,
+                         collapse_tol=1e-4,
+                         use_canonize=False,
+                         backwards_edges=False):
+    all_neighbors, neighbor_distances = get_neighbors(atoms, max_neighbors=max_neighbors, cutoff=cutoff)
     sorted_neighbors = [sorted(n, key=lambda x: x[2]) for n in all_neighbors]
     neighbor_indices = [[l[1] for l in nl] for nl in sorted_neighbors]
     an = np.array(atoms.atomic_numbers)
     neighbor_atomic_numbers = [an[indx] for indx in neighbor_indices]
     distance_an_pairs = [list(zip(d, a)) for d, a in zip(neighbor_distances, neighbor_atomic_numbers)]
-
-    final_neighbor_indices = [[i for i, x in sorted(enumerate(pair), key=lambda x: x[1])][:max_neighbors] for pair in
+    final_neighbor_indices = [[i for i, x in sorted(enumerate(pair), key=lambda x: x[1])][:max_neighbors] for pair
+                              in
                               distance_an_pairs]
-    atomic_num_mat = np.vstack(
-        [[neighbor_atomic_numbers[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)])
-    psuedo_pdd = np.vstack([[neighbor_distances[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)])
+    if collapse:
+        atomic_num_mat = np.vstack(
+            [[neighbor_atomic_numbers[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)])
+        psuedo_pdd = np.vstack(
+            [[neighbor_distances[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)])
 
-    overlapping = pdist(psuedo_pdd, metric='chebyshev') <= collapse_tol
-    types_match = pdist(an.reshape((-1, 1))) == 0
-    neighbors_match = (pdist(atomic_num_mat) == 0)
-    collapsable = overlapping & types_match & neighbors_match
-    groups = _collapse_into_groups(collapsable)
-    sorted_neighbors = [[sorted_neighbors[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)]
-    neighbors = combine(sorted_neighbors, groups)
+        overlapping = pdist(psuedo_pdd, metric='chebyshev') <= collapse_tol
+        types_match = pdist(an.reshape((-1, 1))) == 0
+        neighbors_match = (pdist(atomic_num_mat) == 0)
+        collapsable = overlapping & types_match & neighbors_match
+        groups = _collapse_into_groups(collapsable)
+        sorted_neighbors = [[sorted_neighbors[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)]
+    else:
+        groups = [[i] for i in range(len(sorted_neighbors))]
+        sorted_neighbors = [[sorted_neighbors[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)]
+
+    # neighbors = combine(sorted_neighbors, groups)
     idx_to_keep = set([i[0] for i in groups])
+    # to_group = {nid: group[0] for group in groups for nid in group}
 
-    new_distances = np.hstack([np.mean(psuedo_pdd[group], axis=0) for group in groups])
+    # new_distances = np.hstack([np.mean(psuedo_pdd[group], axis=0) for group in groups])
+    new_ids = {g: i for i, group in enumerate(groups) for g in group}
 
     # edges = defaultdict(set)
     edges = defaultdict(list)
@@ -226,13 +554,12 @@ def nearest_neighbor_ddg(atoms=None,
             else:
                 edges[(site_idx, dst)].append(tuple(image))
 
-    new_ids = {g: i for i, group in enumerate(groups) for g in group}
     w = [len(g) / len(sorted_neighbors) for g in groups]
-    ew = np.repeat(np.array(w).reshape((-1, 1)), max_neighbors*2)
-    ew = ew / ew.sum()
 
     u, v, r = [], [], []
     for (src_id, dst_id), images in edges.items():
+        if src_id not in idx_to_keep:
+            continue
         for ind, dst_image in enumerate(images):
             # fractional coordinate for periodic image of dst
             dst_coord = atoms.frac_coords[dst_id] + dst_image
@@ -244,11 +571,19 @@ def nearest_neighbor_ddg(atoms=None,
                 print(f"On the {ind}-th edge:")
                 print(f"Source: {atoms.frac_coords[src_id]}, Destination: {dst_coord}")
 
-            for uu, vv, dd in [(src_id, dst_id, d), (dst_id, src_id, -d)]:
-                u.append(new_ids[uu])
-                v.append(new_ids[vv])
-                r.append(dd)
+            u.append(new_ids[src_id])
+            v.append(new_ids[dst_id])
+            r.append(d)
+
+            if backwards_edges:
+                u.append(new_ids[dst_id])
+                v.append(new_ids[src_id])
+                r.append(-d)
+
     u, v, r = (np.array(x) for x in (u, v, r))
+    ew = np.repeat(1 / u.shape[0], u.shape[0])
+    ew = ew / ew.sum()
+
     u = torch.tensor(u)
     v = torch.tensor(v)
     r = torch.tensor(r).type(torch.get_default_dtype())
@@ -579,6 +914,7 @@ class Graph(object):
             cutoff_extra=3.5,
             w=None,
             ew=None,
+            collapse=True,
             collapse_tol=1e-4,
     ):
         """Obtain a DGLGraph for Atoms object."""
@@ -603,7 +939,8 @@ class Graph(object):
                 max_neighbors=max_neighbors,
                 use_canonize=use_canonize,
                 collapse_tol=collapse_tol,
-                cutoff=cutoff
+                cutoff=cutoff,
+                collapse=collapse
             )
         else:
             raise ValueError("Not implemented yet", neighbor_strategy)
@@ -614,21 +951,25 @@ class Graph(object):
 
         # build up atom attribute tensor
         sps_features = []
+        atom_types = []
         for ii, s in enumerate(atoms.elements):
             feat = list(get_node_attributes(s, atom_features=atom_features))
             # if include_prdf_angles:
             #    feat=feat+list(prdf[ii])+list(adf[ii])
             sps_features.append(feat)
+            atom_types.append(atoms.atomic_numbers[ii])
         sps_features = np.array(sps_features)
         node_features = torch.tensor(sps_features).type(
             torch.get_default_dtype()
         )
         g = dgl.graph((u, v))
         g.ndata["atom_features"] = node_features
+        g.ndata["atom_types"] = torch.tensor(atom_types).type(torch.get_default_dtype())
         g.edata["r"] = r
         vol = atoms.volume
         g.ndata["V"] = torch.tensor([vol for ii in range(atoms.num_atoms)])
         g.ndata["coords"] = torch.tensor(atoms.cart_coords)
+        g.edata["distances"] = torch.norm(g.edata["r"], dim=1)
         if w is not None:
             g.ndata["weights"] = w
         if ew is not None:
@@ -658,8 +999,10 @@ class Graph(object):
             lg.apply_edges(compute_bond_cosines)
             if neighbor_strategy == "ddg":
                 nn, ne = lg.num_nodes(), lg.num_edges()
-                lg.ndata["weights"] = torch.Tensor([1/nn for _ in range(nn)]).type(torch.get_default_dtype()).reshape((-1, 1))
-                lg.edata["edge_weights"] = torch.Tensor([1/ne for _ in range(ne)]).type(torch.get_default_dtype()).reshape((-1, 1))
+                lg.ndata["weights"] = torch.Tensor([1 / nn for _ in range(nn)]).type(torch.get_default_dtype()).reshape(
+                    (-1, 1))
+                lg.edata["edge_weights"] = torch.Tensor([1 / ne for _ in range(ne)]).type(
+                    torch.get_default_dtype()).reshape((-1, 1))
             return g, lg
         else:
             return g
@@ -935,6 +1278,18 @@ def compute_bond_cosines(edges):
     # print (r2,r2.shape)
     # print (bond_cosine,bond_cosine.shape)
     return {"h": bond_cosine}
+
+
+def bond_cosines(source, dest, repeat=False):
+    if repeat:
+        source = source.repeat_interleave(int(dest.shape[0] / source.shape[0]), dim=0)
+    src = -source
+    dst = dest
+    bond_cosine = torch.sum(src * dst, dim=1) / (
+            torch.norm(src, dim=1) * torch.norm(dst, dim=1)
+    )
+    bond_cosine = torch.clamp(bond_cosine, -1, 1)
+    return bond_cosine
 
 
 class StructureDataset(torch.utils.data.Dataset):
