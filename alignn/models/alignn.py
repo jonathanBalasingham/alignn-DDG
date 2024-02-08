@@ -332,7 +332,10 @@ class ALIGNN(nn.Module):
         x = self.atom_embedding(x)
         # print('x2',x.shape)
         # initial bond features
-        bondlength = torch.norm(g.edata.pop("r"), dim=1)
+        if "distances" in g.edata:
+            bondlength = g.edata["distances"]
+        else:
+            bondlength = torch.norm(g.edata.pop("r"), dim=1)
         y = self.edge_embedding(bondlength)
         w = None
         ew = None
@@ -344,11 +347,11 @@ class ALIGNN(nn.Module):
 
         lgw = None
         lgew = None
-        #if "weights" in lg.ndata:
-        #    lgw = lg.ndata["weights"]
+        if "weights" in lg.ndata:
+            lgw = lg.ndata["weights"]
 
-        #if "edge_weights" in lg.edata:
-        #    lgew = lg.edata["edge_weights"]
+        if "edge_weights" in lg.edata:
+            lgew = lg.edata["edge_weights"]
 
         # ALIGNN updates: update node, edge, triplet features
         for alignn_layer in self.alignn_layers:
@@ -362,7 +365,7 @@ class ALIGNN(nn.Module):
         if w is None:
             h = self.readout(g, x)
         else:
-            h = self.weighted_readout(g, x * w)
+            h = self.weighted_readout(g, x * w.reshape((-1, 1)))
         # print('h',h.shape)
         # print('features',features.shape)
         if self.config.extra_features != 0:

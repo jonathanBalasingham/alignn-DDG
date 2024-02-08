@@ -127,17 +127,31 @@ def load_graphs(
             structure = (
                 Atoms.from_dict(atoms) if isinstance(atoms, dict) else atoms
             )
-            g = Graph.atom_dgl_multigraph(
-                structure,
-                cutoff=cutoff,
-                cutoff_extra=cutoff_extra,
-                atom_features="atomic_number",
-                max_neighbors=max_neighbors,
-                compute_line_graph=False,
-                use_canonize=use_canonize,
-                neighbor_strategy=neighbor_strategy,
-                id=i[id_tag],
-            )
+            if neighbor_strategy == "ddg":
+                g, lg = Graph.atom_dgl_multigraph(
+                    structure,
+                    cutoff=cutoff,
+                    cutoff_extra=cutoff_extra,
+                    atom_features="atomic_number",
+                    max_neighbors=max_neighbors,
+                    compute_line_graph=False,
+                    use_canonize=use_canonize,
+                    neighbor_strategy=neighbor_strategy,
+                    id=i[id_tag],
+                )
+                graphs.append((g, lg))
+            else:
+                g = Graph.atom_dgl_multigraph(
+                    structure,
+                    cutoff=cutoff,
+                    cutoff_extra=cutoff_extra,
+                    atom_features="atomic_number",
+                    max_neighbors=max_neighbors,
+                    compute_line_graph=False,
+                    use_canonize=use_canonize,
+                    neighbor_strategy=neighbor_strategy,
+                    id=i[id_tag],
+                )
             # print ('ii',ii)
             if "extra_features" in i:
                 natoms = len(atoms["elements"])
@@ -145,8 +159,11 @@ def load_graphs(
                 g.ndata["extra_features"] = torch.tensor(
                     [i["extra_features"] for n in range(natoms)]
                 ).type(torch.get_default_dtype())
-            graphs.append(g)
+            if neighbor_strategy != 'ddg':
+                graphs.append(g)
 
+        if neighbor_strategy == "ddg":
+            return graphs
         # df = pd.DataFrame(dataset)
         # print ('df',df)
 
@@ -261,6 +278,7 @@ def get_torch_dataset(
         max_neighbors=max_neighbors,
         id_tag=id_tag,
     )
+    print(f"Size of graphs: {len(graphs)}")
     data = StructureDataset(
         df,
         graphs,
