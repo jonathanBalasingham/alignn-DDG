@@ -9,6 +9,7 @@ from jarvis.analysis.structure.neighbors import NeighborsAnalysis
 from jarvis.core.specie import chem_data, get_node_attributes
 import math
 from scipy.spatial.distance import pdist, squareform
+import amd
 
 # from jarvis.core.atoms import Atoms
 from collections import defaultdict
@@ -69,36 +70,6 @@ def lex_comp(a, b):
             return "lt"
         else:
             return "gt"
-
-
-def combine(neighbors, groups):
-    grouped_atoms = []
-    new_ids = {g: i for i, group in enumerate(groups) for g in group}
-    group_images = defaultdict(list)
-    for group in groups:
-        replacement_atom = neighbors[group[0]]
-        for i in range(len(replacement_atom)):  # Iterate over each neighbor
-            current_distance = 0
-            for nid in group:
-                current_distance += neighbors[nid][i][2]
-            replacement_atom[i][2] = current_distance / len(group)
-            # replacement_atom[i][0] = new_ids[replacement_atom[i][0]]
-            # replacement_atom[i][1] = new_ids[replacement_atom[i][1]]
-        grouped_atoms.append(replacement_atom)
-    return grouped_atoms
-
-
-def compare_points(an1, an2, ann1, ann2, d1, d2):
-    #  Compare Atomic Numbers
-    if an1 < an2:
-        return "lt"
-    elif an2 < an1:
-        return "gt"
-    #  Compare distances
-    comp_res = lex_comp(d1, d2)
-    if comp_res != "eq":
-        return comp_res
-    return lex_comp(ann1, ann2)
 
 
 #  From AMD package
@@ -195,7 +166,6 @@ def group_vertices(lg, g_groups, group_map):
         lg.edges()[1][i] = group_map[lg.edges()[1][i].item()]
     lg.remove_nodes(vertices_to_remove)
     lg.ndata["weights"] = torch.tensor(w)[:, None].type(torch.get_default_dtype())
-
 
 
 def ddg(g: dgl.graph, collapse_tol=1e-4, edata_key="r", ndata_key="atom_features"):
@@ -297,7 +267,6 @@ for i in tqdm(data):
 """
 
 
-
 def lexsort(keys, dim=-1):
     if keys.ndim < 2:
         raise ValueError(f"keys must be at least 2 dimensional, but {keys.ndim=}.")
@@ -328,17 +297,7 @@ def get_neighbors(atoms=None,
 
     if not np.all(neighbors_okay):
         return get_neighbors(atoms, max_neighbors=max_neighbors, cutoff=cutoff * 2)
-    return all_neighbors, neighbor_distances
 
-
-def distribution_graphs(atoms=None,
-         max_neighbors=12,
-         cutoff=8,
-         collapse_tol=1e-4,
-         angle_collapse_tol=1e-3,
-         backwards_edges=False,
-         verbosity=0):
-    all_neighbors, neighbor_distances = get_neighbors(atoms, max_neighbors=max_neighbors, cutoff=cutoff)
     all_neighbors = [sorted(n, key=lambda x: x[2]) for n in all_neighbors]
 
     neighbor_indices = [[l[1] for l in nl] for nl in all_neighbors]
@@ -347,7 +306,100 @@ def distribution_graphs(atoms=None,
     distance_an_pairs = [list(zip(d, a)) for d, a in zip(neighbor_distances, neighbor_atomic_numbers)]
     final_neighbor_indices = [[i for i, x in sorted(enumerate(pair), key=lambda x: x[1])][:max_neighbors] for pair
                               in distance_an_pairs]
+    return all_neighbors, neighbor_distances, neighbor_atomic_numbers, final_neighbor_indices
+
+
+def dist_graphs(atoms=None,
+                max_neighbors=12,
+                cutoff=8,
+                collapse_tol=1e-4,
+                angle_collapse_tol=1e-3,
+                backwards_edges=False,
+                atom_features="cgcnn",
+                verbosity=0):
+    all_neighbors, neighbor_distances, neighbor_atomic_numbers, final_neighbor_indices = (
+        get_neighbors(atoms, max_neighbors=max_neighbors, cutoff=cutoff))
+
     all_neighbors = [[all_neighbors[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)]
+    an = np.array(atoms.atomic_numbers)
+
+    clouds = [np.vstack([atoms.lattice.cart_coords(atoms.frac_coords[n[1]] + n[-1] - atoms.frac_coords[n[0]])
+                         for n in neighbors[:max_neighbors]])
+              for neighbors in all_neighbors]
+
+    pdds = [amd.PDD_finite(cloud) for cloud in clouds]
+
+    atomic_num_mat = np.vstack(
+        [[neighbor_atomic_numbers[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)])
+    psuedo_pdd = np.vstack(
+        [[neighbor_distances[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)])
+
+    g_types_match = pdist(an.reshape((-1, 1))) == 0
+    g_neighbors_match = (pdist(atomic_num_mat) == 0)
+    collapsable = (amd.PDD_pdist(pdds) < collapse_tol) & g_types_match & g_neighbors_match
+    groups = _collapse_into_groups(collapsable)
+    group_map = {g: i for i, group in enumerate(groups) for g in group}
+    idx_to_keep = set([group[0] for group in groups])
+
+    m = len(all_neighbors)
+    weights = np.full((m,), 1 / m, dtype=np.float64)
+    weights = np.array([np.sum(weights[group]) for group in groups])
+    dists = np.array(
+        [np.average(psuedo_pdd[group], axis=0) for group in groups],
+        dtype=np.float64
+    ).reshape(-1)
+    edge_weights = np.repeat(np.array(weights).reshape((-1, 1)), max_neighbors)
+    edge_weights = edge_weights / edge_weights.sum()
+    u = [group_map[n[0]] for i, neighbors in enumerate(all_neighbors) for n in neighbors if i in idx_to_keep]
+    v = [group_map[n[1]] for i, neighbors in enumerate(all_neighbors) for n in neighbors if i in idx_to_keep]
+    r = np.vstack([cloud for i, cloud in enumerate(clouds) if i in idx_to_keep])
+
+    if backwards_edges:
+        edge_weights = np.concatenate([edge_weights, edge_weights])
+        edge_weights = edge_weights / edge_weights.sum()
+        u2 = np.concatenate([u, v])
+        v = np.concatenate([v, u])
+        u = u2
+        r = np.vstack([r, -r])
+        dists = np.concatenate([dists, dists])
+
+    g = dgl.graph((u, v))
+    g.edata["distances"] = torch.tensor(dists).type(torch.get_default_dtype())
+    g.ndata["weights"] = torch.tensor(weights).type(torch.get_default_dtype())
+    g.edata["r"] = torch.tensor(r).type(torch.get_default_dtype())
+    g.edata["edge_weights"] = torch.tensor(edge_weights).type(torch.get_default_dtype())
+
+    sps_features = []
+    atom_types = []
+    for ii, s in enumerate(atoms.elements):
+        if ii in idx_to_keep:
+            feat = list(get_node_attributes(s, atom_features=atom_features))
+            sps_features.append(feat)
+            atom_types.append(atoms.atomic_numbers[ii])
+
+    sps_features = np.array(sps_features)
+    node_features = torch.tensor(sps_features).type(
+        torch.get_default_dtype()
+    )
+    g.ndata["atom_features"] = node_features
+    g.ndata["atom_types"] = torch.tensor(atom_types).type(torch.get_default_dtype())
+    lg = g.line_graph(shared=True)
+    lg.apply_edges(compute_bond_cosines)
+    return g, lg
+
+
+def distribution_graphs(atoms=None,
+                        max_neighbors=12,
+                        cutoff=8,
+                        collapse_tol=1e-4,
+                        angle_collapse_tol=1e-3,
+                        backwards_edges=False,
+                        atom_features="cgcnn",
+                        verbosity=0):
+    all_neighbors, neighbor_distances, neighbor_atomic_numbers, final_neighbor_indices = (
+        get_neighbors(atoms, max_neighbors=max_neighbors, cutoff=cutoff))
+    an = np.array(atoms.atomic_numbers)
+
     if verbosity > 0:
         print(f"Size of motif: {len(all_neighbors)}")
         if verbosity > 1:
@@ -366,11 +418,20 @@ def distribution_graphs(atoms=None,
         print(g_collapsable)
 
     # Angles
+    """
+    For each atom in the motif p_i, the possible combinations of neighbors to produce angles are:
+    [p_i -> N_1(p_i), p_i -> N_2(p_i)], ... [p_i -> N_{k-1}(p_i), p_i -> N_k(p_i)]
+    
+    """
+    # edges = [(i, j) for i in range(max_neighbors) for j in range(max_neighbors)]
     combos = [[(neighbors[i][2], neighbors[j][2], an[neighbors[i][1]], an[neighbors[j][1]], i, j)
                for i in range(max_neighbors - 1) for j in range(i + 1, max_neighbors)] for neighbors in all_neighbors]
 
     if verbosity > 1:
         print(f"Number of possible combos: {len(combos[0])}")
+        if verbosity > 2:
+            print(f"Combinations: {combos}")
+
     combo_indices = [[i for i, x in sorted(enumerate(combo), key=lambda x: x[1])] for combo
                      in combos]
 
@@ -392,10 +453,12 @@ def distribution_graphs(atoms=None,
             d_a = atoms.lattice.cart_coords(dst_coord_a - atoms.frac_coords[src_id])
             d_b = atoms.lattice.cart_coords(dst_coord_b - atoms.frac_coords[src_id])
             rs.append([d_a, d_b])
-            etypes.append([min(an[dst_id_a], an[dst_id_b]), max(an[dst_id_a], an[dst_id_b])])
+            # etypes.append([min(an[dst_id_a], an[dst_id_b]), max(an[dst_id_a], an[dst_id_b])])
+            etypes.append([an[dst_id_a], an[dst_id_b]])
             distance1 = np.linalg.norm(d_a)
             distance2 = np.linalg.norm(d_b)
-            ntypes.append([np.min(distance1), np.max(distance2)])
+            # ntypes.append([np.min(distance1), np.max(distance2)])
+            ntypes.append([distance1, distance2])
 
     p = torch.tensor(np.array(rs)).type(torch.get_default_dtype())
     angles = bond_cosines(p[:, 0, :], p[:, 1, :]).reshape((len(all_neighbors), -1))
@@ -421,7 +484,7 @@ def distribution_graphs(atoms=None,
     if verbosity > 0:
         print(f"Number of groups: {len(groups)}")
         if verbosity > 1:
-            print(groups)
+            print(f"Groups: {groups}")
 
     m = len(all_neighbors)
     weights = np.full((m,), 1 / m, dtype=np.float64)
@@ -430,6 +493,8 @@ def distribution_graphs(atoms=None,
         [np.average(psuedo_pdd[group], axis=0) for group in groups],
         dtype=np.float64
     )
+    edge_weights = np.repeat(np.array(weights).reshape((-1, 1)), max_neighbors)
+    edge_weights = edge_weights / edge_weights.sum()
 
     angles = np.array(
         [np.average(original_angles[group], axis=0) for group in groups],
@@ -461,6 +526,7 @@ def distribution_graphs(atoms=None,
     g.edata["distances"] = torch.tensor(edata).type(torch.get_default_dtype())
     g.ndata["weights"] = torch.tensor(weights).type(torch.get_default_dtype())
     g.edata["r"] = torch.tensor(np.array(r)).type(torch.get_default_dtype())
+    g.edata["edge_weights"] = torch.tensor(edge_weights).type(torch.get_default_dtype())
 
     lg_u, lg_v, lg_edata = [], [], []
     idx_to_keep = set([group[0] for group in groups])
@@ -468,33 +534,81 @@ def distribution_graphs(atoms=None,
         print(f"Size of ordered pairs: {len(ordered_pairs[0])}")
 
     for i, pairs in enumerate(ordered_pairs):
-        if verbosity > 0:
+        if verbosity > 3:
             print(f"Checking if {i} in {idx_to_keep}")
         if i in idx_to_keep:
             for id1, id2 in pairs:
-                if verbosity > 2:
+                if verbosity > 3:
                     print(f"Angle Triplet: {(i, id1, id2)}")
                 lg_u.append(edge_map[(group_map[i], id1)])
                 lg_v.append(edge_map[(group_map[i], id2)])
 
+    if verbosity > 1:
+        print(f"Adding {len(lg_u), len(lg_v)} to LG")
     lg = dgl.graph((lg_u, lg_v))
-    lg.edata["h"] = torch.tensor(angles.reshape((-1)))
+    lg.edata["h"] = torch.tensor(angles.reshape((-1))).type(torch.get_default_dtype())
+    for i in range(atoms.num_atoms - 1, -1, -1):
+        if i not in idx_to_keep:
+            atoms = atoms.remove_site_by_index(i)
+    sps_features = []
+    atom_types = []
+    for ii, s in enumerate(atoms.elements):
+        feat = list(get_node_attributes(s, atom_features=atom_features))
+        sps_features.append(feat)
+        atom_types.append(atoms.atomic_numbers[ii])
+
+    sps_features = np.array(sps_features)
+    node_features = torch.tensor(sps_features).type(
+        torch.get_default_dtype()
+    )
+    g.ndata["atom_features"] = node_features
+    g.ndata["atom_types"] = torch.tensor(atom_types).type(torch.get_default_dtype())
     return g, lg
+
+
+def check_sizes(k, be=False):
+    from jarvis.db.figshare import data
+    from jarvis.core.atoms import Atoms
+    d = data('dft_3d')
+    properties = ["exfoliation_energy", "dfpt_piezo_max_eij", "dfpt_piezo_max_dij", "bulk_modulus_kv",
+                  "shear_modulus_gv",
+                  "formation_energy_peratom", "mbj_bandgap"]
+    lg_dec, lg_dec2 = [], []
+    g_dec, g_dec2 = [], []
+    for prop in properties:
+        samples = 0
+        for i in tqdm(d):
+            if i[prop] == "na":
+                continue
+            a = Atoms.from_dict(i['atoms'])
+            g, lg = dist_graphs(a, max_neighbors=k, backwards_edges=be)
+            g2, lg2 = Graph.atom_dgl_multigraph(a, neighbor_strategy='k-nearest', max_neighbors=12)
+            lg_dec.append(lg.num_nodes() / lg2.num_nodes())
+            lg_dec2.append(lg.num_edges() / lg2.num_edges())
+            g_dec.append(g.num_nodes() / g2.num_nodes())
+            g_dec2.append(g.num_edges() / g2.num_edges())
+            samples += 1
+        print("")
+        print(f"{prop}: {samples}")
+        print(f"Relative Size of G: {np.mean(g_dec)} and {np.mean(g_dec2)}")
+        print(f"Relative Size of LG: {np.mean(lg_dec)} and {np.mean(lg_dec2)}")
 
 
 """
 dec = []
 dec2 = []
 ind = 0
+props = ["formation_energy_peratom
+
 for i in tqdm(d):
     a = Atoms.from_dict(i['atoms'])
-    g, lg = test(a, max_neighbors=24)
+    g, lg = distribution_graphs(a, max_neighbors=24)
     if g.num_nodes() == 0 or lg.num_nodes == 0:
         print(ind)
         continue
-    #g2, lg2 = Graph.atom_dgl_multigraph(a, neighbor_strategy='k-nearest', max_neighbors=12, collapse=False)
-    #dec.append(lg.num_nodes() / lg2.num_nodes())
-    #dec2.append(lg.num_edges() / lg2.num_edges())
+    g2, lg2 = Graph.atom_dgl_multigraph(a, neighbor_strategy='k-nearest', max_neighbors=12, collapse=False)
+    dec.append(lg.num_nodes() / lg2.num_nodes())
+    dec2.append(lg.num_edges() / lg2.num_edges())
     ind += 1
 """
 
