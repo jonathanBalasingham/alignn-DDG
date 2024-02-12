@@ -73,7 +73,7 @@ def lex_comp(a, b):
 
 
 #  From AMD package
-def _collapse_into_groups(overlapping):
+def collapse_into_groups(overlapping):
     overlapping = squareform(overlapping)
     group_nums = {}  # row_ind: group number
     group = 0
@@ -309,11 +309,21 @@ def get_neighbors(atoms=None,
     return all_neighbors, neighbor_distances, neighbor_atomic_numbers, final_neighbor_indices
 
 
+def get_cloud(atoms, all_neighbors, src_id, max_neighbors):
+    nids = set([n[1] for n in all_neighbors[src_id]])
+    if src_id in nids:
+        nids.remove(src_id)
+    nids = [src_id] + list(nids)
+    neighbors = [all_neighbors[nid][:max_neighbors] for nid in nids]
+    neighbors = sum(neighbors, [])
+    return np.vstack([atoms.lattice.cart_coords(atoms.frac_coords[n[1]] + n[-1] - atoms.frac_coords[n[0]])
+                      for n in neighbors])
+
+
 def dist_graphs(atoms=None,
                 max_neighbors=12,
                 cutoff=8,
                 collapse_tol=1e-4,
-                angle_collapse_tol=1e-3,
                 backwards_edges=False,
                 atom_features="cgcnn",
                 verbosity=0):
@@ -337,7 +347,12 @@ def dist_graphs(atoms=None,
     g_types_match = pdist(an.reshape((-1, 1))) == 0
     g_neighbors_match = (pdist(atomic_num_mat) == 0)
     collapsable = (amd.PDD_pdist(pdds) < collapse_tol) & g_types_match & g_neighbors_match
-    groups = _collapse_into_groups(collapsable)
+    groups = collapse_into_groups(collapsable)
+    group_map = {g: i for i, group in enumerate(groups) for g in group}
+
+    same_neighbors = pdist([[group_map[n[1]] for n in src] for src in all_neighbors]) == 0
+    collapsable &= same_neighbors
+    groups = collapse_into_groups(collapsable)
     group_map = {g: i for i, group in enumerate(groups) for g in group}
     idx_to_keep = set([group[0] for group in groups])
 
@@ -345,14 +360,14 @@ def dist_graphs(atoms=None,
     weights = np.full((m,), 1 / m, dtype=np.float64)
     weights = np.array([np.sum(weights[group]) for group in groups])
     dists = np.array(
-        [np.average(psuedo_pdd[group], axis=0) for group in groups],
+        [np.average(psuedo_pdd[group][:, :max_neighbors], axis=0) for group in groups],
         dtype=np.float64
     ).reshape(-1)
     edge_weights = np.repeat(np.array(weights).reshape((-1, 1)), max_neighbors)
     edge_weights = edge_weights / edge_weights.sum()
-    u = [group_map[n[0]] for i, neighbors in enumerate(all_neighbors) for n in neighbors if i in idx_to_keep]
-    v = [group_map[n[1]] for i, neighbors in enumerate(all_neighbors) for n in neighbors if i in idx_to_keep]
-    r = np.vstack([cloud for i, cloud in enumerate(clouds) if i in idx_to_keep])
+    u = [group_map[n[0]] for i, neighbors in enumerate(all_neighbors) for n in neighbors[:max_neighbors] if i in idx_to_keep]
+    v = [group_map[n[1]] for i, neighbors in enumerate(all_neighbors) for n in neighbors[:max_neighbors] if i in idx_to_keep]
+    r = np.vstack([cloud[:max_neighbors] for i, cloud in enumerate(clouds) if i in idx_to_keep])
 
     if backwards_edges:
         edge_weights = np.concatenate([edge_weights, edge_weights])
@@ -478,7 +493,7 @@ def distribution_graphs(atoms=None,
     ntypes_match = pdist(ntypes[:, :], metric='chebychev') < collapse_tol
 
     collapsable = g_collapsable & lg_nodes_match & etypes_match & ntypes_match
-    groups = _collapse_into_groups(collapsable)
+    groups = collapse_into_groups(collapsable)
     group_map = {g: i for i, group in enumerate(groups) for g in group}
 
     if verbosity > 0:
@@ -566,7 +581,7 @@ def distribution_graphs(atoms=None,
     return g, lg
 
 
-def check_sizes(k, be=False):
+def check_sizes(k, be=False, collapse_tol=1e-4):
     from jarvis.db.figshare import data
     from jarvis.core.atoms import Atoms
     d = data('dft_3d')
@@ -581,7 +596,7 @@ def check_sizes(k, be=False):
             if i[prop] == "na":
                 continue
             a = Atoms.from_dict(i['atoms'])
-            g, lg = dist_graphs(a, max_neighbors=k, backwards_edges=be)
+            g, lg = dist_graphs(a, max_neighbors=k, backwards_edges=be, collapse_tol=collapse_tol)
             g2, lg2 = Graph.atom_dgl_multigraph(a, neighbor_strategy='k-nearest', max_neighbors=12)
             lg_dec.append(lg.num_nodes() / lg2.num_nodes())
             lg_dec2.append(lg.num_edges() / lg2.num_edges())
@@ -639,7 +654,7 @@ def nearest_neighbor_ddg(atoms=None,
         types_match = pdist(an.reshape((-1, 1))) == 0
         neighbors_match = (pdist(atomic_num_mat) == 0)
         collapsable = overlapping & types_match & neighbors_match
-        groups = _collapse_into_groups(collapsable)
+        groups = collapse_into_groups(collapsable)
         sorted_neighbors = [[sorted_neighbors[i][j] for j in ind] for i, ind in enumerate(final_neighbor_indices)]
     else:
         groups = [[i] for i in range(len(sorted_neighbors))]
